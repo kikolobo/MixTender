@@ -1,6 +1,19 @@
 #include "Dispenser.h"
 
 
+
+Dispenser::Dispenser(uint8_t dat_pin, uint8_t sck_pin, float emptyWeight, float kFactor) {
+    scale_ = std::make_unique<HX711>();
+    scale_->begin(dat_pin, sck_pin);
+    scale_->set_scale(kFactor);
+    valves_.clear();
+    emptyWeight_ = emptyWeight;    
+    scale_->tare();
+    valveIndex_ = 0;
+    pumpIndex_ = 0;
+};
+
+
 void Dispenser::heartbeat() {
     
     if (scale_->is_ready()) {
@@ -20,13 +33,6 @@ void Dispenser::heartbeat() {
         return; //Skip all the noise if we're not dispensing.
     }
 
-    if (state_ == DispenserState::DISPENSING) {                
-        if (latestWeight_ >= targetWeight_) {
-            Serial.println("[Dispenser][DISPENSING] Dispensing complete.");
-            finishDispensing_();
-        }
-    }
-
     if (state_ == DispenserState::AWAITING_CLOSURE) {
         if (millis() - awaitingClosureTimeStampMS_ > 1000) {
             Serial.println("[Dispenser][AWAITING_CLOSURE] Awaiting closure complete.");
@@ -36,16 +42,23 @@ void Dispenser::heartbeat() {
 
     if (state_ == DispenserState::AWAITING_STABILITY) {
         if (millis() - awaitingStabilityTimeStampMS_ > 500) {
+            Serial.println("[Dispenser][AWAITING_STABILITY] Awaiting stability complete.");
+            state_ = DispenserState::STABLE;
+            tare();        
+        }
+    }
+
+    if (state_ == DispenserState::STABLE) {
             Serial.println("[Dispenser][AWAITING_STABILITY] Awaiting stability reached..");            
             Serial.println("[Dispenser][AWAITING_STABILITY] Station Begin weight: " + String(getLatestWeight()) + "g");
-            valves_[valveIndex_]->setPosition(Valve::Position::OPEN);    
-            tare();
-        }
-
-        if (millis() - awaitingStabilityTimeStampMS_ > 800) {            
-            Serial.println("[Dispenser][AWAITING_STABILITY] Awaiting stability complete.");
-            Serial.println("[Dispenser][AWAITING_STABILITY] Station Tared weight: " + String(getLatestWeight()) + "g");
             state_ = DispenserState::DISPENSING;
+            valves_[valveIndex_]->setPosition(Valve::Position::OPEN);                            
+    }
+
+    if (state_ == DispenserState::DISPENSING) {
+        if (latestWeight_ >= targetWeight_) {
+            Serial.println("[Dispenser][DISPENSING] Dispensing complete.");
+            finishDispensing_();
         }
     }
 };
@@ -54,14 +67,6 @@ void Dispenser::tare() {
     scale_->tare();
 };
 
-Dispenser::Dispenser(uint8_t dat_pin, uint8_t sck_pin, float emptyWeight, float kFactor) {
-    scale_ = std::make_unique<HX711>();
-    scale_->begin(dat_pin, sck_pin);
-    scale_->set_scale(kFactor);
-    valves_.clear();
-    emptyWeight_ = emptyWeight;    
-    scale_->tare();
-};
 
 void Dispenser::selectValveForTrim(uint32_t valveId, Valve::Position position) {
     if (valveId > valves_.size()) {
@@ -79,31 +84,51 @@ void Dispenser::selectValveForTrim(uint32_t valveId, Valve::Position position) {
     }
 };
 
-void Dispenser::beginDispensing(uint8_t valveIndex, float targetWeight) {
-    valveIndex_ = valveIndex-1;    
+void Dispenser::beginDispensing(uint8_t valveOrPumpIndex, float targetWeight, DispenseType type) {
 
-    if (valveIndex_ > valves_.size()-1) {
-        Serial.println("[Dispenser][beginDispensing] Invalid valve Index: " + String(valveIndex_) + " out of " + String(valves_.size()-1) + " valves.");
-        return;
-    }
+    if (type == DispenseType::PUMP) {
+        if (valveOrPumpIndex > pumps_.size()-1) {
+            Serial.println("[Dispenser][beginDispensing] Invalid pump Index: " + String(valveOrPumpIndex) + " out of " + String(pumps_.size()-1) + " pumps.");
+            return;
+        }
+       pumpIndex_ = valveOrPumpIndex-1;       
+    } else {
+        if (valveOrPumpIndex > valves_.size()-1) {
+            Serial.println("[Dispenser][beginDispensing] Invalid valve Index: " + String(valveIndex_) + " out of " + String(valves_.size()-1) + " valves.");
+            return;
+        }
+       valveIndex_ = valveOrPumpIndex-1;        
+    }    
     
+    dispenseType_ = type;
     state_ = DispenserState::AWAITING_STABILITY;
     
-    Serial.println("[Dispenser][beginDispensing] Beginning dispensing on internal IDX: " + String(valveIndex_));    
+    Serial.println("[Dispenser][beginDispensing] Beginning dispensing on internal IDX: " + String(valveOrPumpIndex));    
     targetWeight_ = targetWeight;        
     awaitingStabilityTimeStampMS_ = millis();    
 };
 
 void Dispenser::abortDispensing() {    
     Serial.println("[Dispenser][abortDispensing] Aborting dispensing.");
-    valves_[valveIndex_]->setPosition(Valve::Position::CLOSED);
+    
+    if (dispenseType_ == DispenseType::PUMP) {
+        pumps_[pumpIndex_]->off();
+    } else {
+        valves_[valveIndex_]->setPosition(Valve::Position::CLOSED);
+    }
+    
     resetDispensing_(true); //Skip Callback....
 };
 
-void Dispenser::finishDispensing_() {    
-    Serial.println("[Dispenser][finishDispensing_] Finishing dispensing internal IDX: " + String(valveIndex_));
+void Dispenser::finishDispensing_() {        
+    if (dispenseType_ == DispenseType::PUMP) {
+        Serial.println("[Dispenser][finishDispensing_] Finishing dispensing internal pump IDX: " + String(pumpIndex_));
+        pumps_[pumpIndex_]->off();
+    } else {
+        Serial.println("[Dispenser][finishDispensing_] Finishing dispensing internal valve IDX: " + String(valveIndex_));
+        valves_[valveIndex_]->setPosition(Valve::Position::CLOSED);    
+    }
 
-    valves_[valveIndex_]->setPosition(Valve::Position::CLOSED);    
     state_ = DispenserState::AWAITING_CLOSURE;
     awaitingClosureTimeStampMS_ = millis();
 };
@@ -118,11 +143,17 @@ float Dispenser::getLatestWeight() {
 
 void Dispenser::resetDispensing_(bool skipCallback) {    
 
-    if (completionCallback_ != nullptr && skipCallback == false) { completionCallback_(valveIndex_, latestWeight_); }
+    uint8_t index = valveIndex_;
+    if (dispenseType_ == DispenseType::PUMP) {
+        index = pumpIndex_;
+    } 
+
+    if (completionCallback_ != nullptr && skipCallback == false) { completionCallback_(dispenseType_, valveIndex_, latestWeight_); }
     state_ = DispenserState::READY;
     Serial.println("[Dispenser][resetDispensing_] Resetting dispensing state.");
     targetWeight_ = 0.0;
     valveIndex_ = 0;
+    pumpIndex_ = 0;
     latestWeight_ = 0.0;
     
     awaitingClosureTimeStampMS_ = 0;
@@ -170,6 +201,11 @@ void Dispenser::resetTrimPositions() {
 uint8_t Dispenser::registerValve(std::shared_ptr<Valve> valve) {    
     valves_.push_back(valve);
     return valves_.size();
+};
+
+uint8_t Dispenser::registerPump(std::shared_ptr<Pump> pump) {
+    pumps_.push_back(pump);
+    return pumps_.size();
 };
 
 void Dispenser::registerCompletionCallback(DispenseCompleteCallback callback) {

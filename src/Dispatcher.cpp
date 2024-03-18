@@ -28,14 +28,12 @@ void Dispatcher::heartbeat() {
 }
 
 void Dispatcher::movingPhase_() {
-
     if (transport_->getState() == Transport::MachineState::AT_TARGET) {
         Serial.println("[Dispatcher][movingPhase_] Transport at target.");
         state_ = DispatcherState::SERVING;
         steps_[currentStep_].beginDispensingTimeStampMS = millis();
-        dispenser_->beginDispensing(steps_[currentStep_].valveIndex, steps_[currentStep_].targetWeight);
-    }
-    
+        dispenser_->beginDispensing(steps_[currentStep_].index, steps_[currentStep_].targetWeight, steps_[currentStep_].type);
+    }    
 }
 
 void Dispatcher::servingPhase_() {
@@ -88,7 +86,7 @@ void Dispatcher::reset_() {
 
 void Dispatcher::performNextStep_() {
         Serial.println("[Dispatcher][performNextStep_] Performing next step: " + String(currentStep_) + " of " + String(steps_.size()-1));
-        transport_->goToStation(steps_[currentStep_].valveIndex);
+        transport_->goToStation(steps_[currentStep_].index);
         steps_[currentStep_].beginMovementTimeStampMS = millis();        
         state_ = DispatcherState::MOVING;
 }
@@ -97,9 +95,11 @@ void Dispatcher::clearSteps() {
     steps_.clear();
 }
 
-void Dispatcher::addStep(uint8_t valveIndex, float targetWeight) {
+void Dispatcher::addStep(Dispenser::DispenseType type,  uint8_t index, uint8_t stationIndex, float targetWeight) {
     Steps step;
-    step.valveIndex = valveIndex;
+    step.index = index;
+    step.stationIndex = stationIndex;
+    step.type = type;
     step.targetWeight = targetWeight;
     step.stepCompleted = false;
     steps_.push_back(step);
@@ -124,7 +124,7 @@ bool Dispatcher::start() {
     Serial.println("[Dispatcher][start] Start weight: " + String(dispenser_->getLatestWeight()) + "g");
 
     dispenser_->tare();
-    transport_->goToStation(steps_[currentStep_].valveIndex);
+    transport_->goToStation(steps_[currentStep_].stationIndex);
     steps_[currentStep_].beginMovementTimeStampMS = millis();
     state_ = DispatcherState::MOVING;
 

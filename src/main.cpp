@@ -93,21 +93,27 @@ void setup() {
   dispenser = std::make_shared<Dispenser>(LC_DAT, LC_SCK, calibration_factor , 444.0);
   dispatcher = std::make_unique<Dispatcher>(dispenser, transport);
 
-  transport->defineStation(12);
+  transport->defineStation(12);  
   transport->defineStation(426);
   transport->defineStation(875);
   transport->defineStation(1309);
   transport->defineStation(1759);
   transport->defineStation(2192);
 
-  // dispenser->registerCompletionCallback(dispensingCompleted);   
-  // transport->setTargetReachedCalledBack(targetReached);
+  transport->defineStation(650); //Pumps
+  
+  //Register Valves
   dispenser->registerValve(std::make_shared<Valve>(SERVO0_PIN));
   dispenser->registerValve(std::make_shared<Valve>(SERVO1_PIN));
   dispenser->registerValve(std::make_shared<Valve>(SERVO2_PIN));
   dispenser->registerValve(std::make_shared<Valve>(SERVO3_PIN));
   dispenser->registerValve(std::make_shared<Valve>(SERVO4_PIN));
   dispenser->registerValve(std::make_shared<Valve>(SERVO5_PIN));
+
+  //Register Pumps
+  dispenser->registerPump(std::make_shared<Pump>(CH1_PIN));
+  dispenser->registerPump(std::make_shared<Pump>(CH2_PIN));
+  dispenser->registerPump(std::make_shared<Pump>(CH3_PIN));
 
 
 ledMan = std::make_unique<LedManager>(SDA);
@@ -157,8 +163,9 @@ void loop() {
         // dispatcher->addStep(1, 50.0-(50 *.08));   
         // dispatcher->addStep(2, 50.0-(50 *.08));   
         // dispatcher->addStep(3, 100.0-(100 *.08));   
-        dispatcher->addStep(4, 50.0-(50 *.08));   
-        dispatcher->addStep(6, 50.0-(50 *.08));   
+        dispatcher->addStep(Dispenser::DispenseType::VALVE, 4, 4, 50.0);
+        dispatcher->addStep(Dispenser::DispenseType::VALVE, 6, 6, 50.0);
+        dispatcher->addStep(Dispenser::DispenseType::PUMP, 1, 7, 50.0);  //Pump 1 / Station 7
         // dispatcher->addStep(6, 50.0-(50 *.08));   
         // dispatcher->addStep(2, 50.0-(50 *.08));
         dispatcher->start();
