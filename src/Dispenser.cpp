@@ -2,15 +2,15 @@
 
 
 
-Dispenser::Dispenser(uint8_t dat_pin, uint8_t sck_pin, float emptyWeight, float kFactor) {
+Dispenser::Dispenser(uint8_t dat_pin, uint8_t sck_pin, float kFactor,  float emptyWeight ) {
     scale_ = std::make_unique<HX711>();
     scale_->begin(dat_pin, sck_pin);
     scale_->set_scale(kFactor);
     valves_.clear();
-    emptyWeight_ = emptyWeight;    
-    scale_->tare();
+    emptyWeight_ = emptyWeight;      
     valveIndex_ = 0;
     pumpIndex_ = 0;
+    Serial.println("[Dispenser][Constructor] Dispenser created: " + String(scale_->get_units(1)));
 };
 
 
@@ -18,7 +18,7 @@ void Dispenser::heartbeat() {
     
     if (scale_->is_ready()) {
         float alpha = 0.4; // Smoothing factor. Adjust as needed.
-        float rawValue = fabs(scale_->get_units(1)); // Get the current raw value        
+        float rawValue = scale_->get_units(1); // Get the current raw value        
         filteredValue_ = alpha * rawValue + (1 - alpha) * filteredValue_; // Apply the low-pass filter
 
         float resolution = 0.14; // Target resolution, e.g., 0.1 kg
@@ -26,7 +26,7 @@ void Dispenser::heartbeat() {
 
 
         latestWeight_ = finalValue; //fabs(scale_->get_units(5));
-        // Serial.println("[Dispenser][heartbeat] Latest weight: " + String(latestWeight_) + "g");
+        // Serial.println("[Dispenser][heartbeat] Latest weight: " A+ String(latestWeight_) + "g");
     }
 
     if (state_ == DispenserState::READY) {
@@ -45,15 +45,13 @@ void Dispenser::heartbeat() {
     }
 
     if (state_ == DispenserState::AWAITING_STABILITY) {
-        if (millis() - awaitingStabilityTimeStampMS_ > 500) {            
-            state_ = DispenserState::STABLE;
-            tare();        
+        if (millis() - awaitingStabilityTimeStampMS_ > 500) {
+            state_ = DispenserState::STABLE;            
         }
     }
 
-    if (state_ == DispenserState::STABLE) {
-            Serial.println("[Dispenser][AWAITING_STABILITY] Awaiting stability reached..");            
-            Serial.println("[Dispenser][AWAITING_STABILITY] Station Begin weight: " + String(getLatestWeight()) + "g");
+    if (state_ == DispenserState::STABLE) {             
+            Serial.println("[Dispenser][AWAITING_STABILITY] Station Begin weight: " + String(getLatestWeight()) + "g");            
             state_ = DispenserState::DISPENSING;
             if (dispenseType_ == DispenseType::PUMP) {
                 pumps_[pumpIndex_]->on();
@@ -71,6 +69,7 @@ void Dispenser::heartbeat() {
 };
 
 void Dispenser::tare() {
+    Serial.println("[Dispenser][tare] Scale Tared.");
     scale_->tare();
 };
 
@@ -94,14 +93,14 @@ void Dispenser::selectValveForTrim(uint32_t valveId, Valve::Position position) {
 void Dispenser::beginDispensing(uint8_t valveOrPumpIndex, float targetWeight, DispenseType type) {
 
     if (type == DispenseType::PUMP) {        
-        if (valveOrPumpIndex > pumps_.size()-1) {
+        if (valveOrPumpIndex > pumps_.size()) {
             Serial.println("[Dispenser][beginDispensing] Invalid pump Index: " + String(valveOrPumpIndex) + " out of " + String(pumps_.size()-1) + " pumps.");
             return;
         }
         pumpIndex_ = valveOrPumpIndex-1;       
     } else {
-        if (valveOrPumpIndex > valves_.size()-1) {
-            Serial.println("[Dispenser][beginDispensing] Invalid valve Index: " + String(valveIndex_) + " out of " + String(valves_.size()-1) + " valves.");
+        if (valveOrPumpIndex > valves_.size()) {
+            Serial.println("[Dispenser][beginDispensing] Invalid valve Index: " + String(valveOrPumpIndex) + " out of " + String(valves_.size()-1) + " valves.");
             return;
         }
         valveIndex_ = valveOrPumpIndex-1;
@@ -109,7 +108,7 @@ void Dispenser::beginDispensing(uint8_t valveOrPumpIndex, float targetWeight, Di
     
     dispenseType_ = type;
     state_ = DispenserState::AWAITING_STABILITY;
-    
+    tare();
     Serial.println("[Dispenser][beginDispensing] Beginning dispensing on internal IDX: " + String(valveOrPumpIndex));    
     targetWeight_ = targetWeight;        
     awaitingStabilityTimeStampMS_ = millis();    
@@ -148,6 +147,13 @@ float Dispenser::getLatestWeight() {
     return latestWeight_ ;
 };
 
+float Dispenser::getAbsoluteWeight() {
+    float offset = ((float)scale_->get_offset() / (float)scale_->get_scale());
+    float absWeight = (latestWeight_ + offset) - emptyWeight_;
+
+    return absWeight; //fabs(offset);
+};
+
 void Dispenser::resetDispensing_(bool skipCallback) {    
 
     uint8_t index = valveIndex_;
@@ -156,6 +162,7 @@ void Dispenser::resetDispensing_(bool skipCallback) {
     } 
 
     if (completionCallback_ != nullptr && skipCallback == false) { completionCallback_(dispenseType_, valveIndex_, latestWeight_); }
+
     state_ = DispenserState::FINISHED;
     Serial.println("[Dispenser][resetDispensing_] Resetting dispensing state.");
     targetWeight_ = 0.0;

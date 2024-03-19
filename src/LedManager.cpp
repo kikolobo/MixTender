@@ -100,7 +100,7 @@ void LedManager::setRange(uint8_t start, uint8_t end, CRGB color) {
 
 void LedManager::trackTray(uint32_t position, CRGB color, CRGB backgroundColor) {
     backgroundColor_ = backgroundColor;
-    int ledIndex = map(position, 2350, 0, 0, numLeds_); //2192
+    int ledIndex = map(position, 2340, 0, 0, numLeds_); 
     if (ledIndex<=14) {ledIndex = 14;}
     setRange(ledIndex-14, ledIndex, color);    
 }

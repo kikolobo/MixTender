@@ -14,7 +14,7 @@ public:
         READY,
         DISPENSING,
         AWAITING_CLOSURE,
-        AWAITING_STABILITY,
+        AWAITING_STABILITY,        
         STABLE,
         FINISHED,
     };
@@ -26,7 +26,7 @@ public:
 
     using DispenseCompleteCallback = std::function<void(DispenseType type, uint8_t index, float dispensedWeight)>;
 
-    Dispenser(uint8_t dat_pin, uint8_t sck_pin, float emptyWeight = 0.0, float kFactor = -438);
+    Dispenser(uint8_t dat_pin, uint8_t sck_pin, float kFactor = 428.0, float emptyWeight = 0.0);
     u_int8_t registerValve(std::shared_ptr<Valve> valve);
     u_int8_t registerPump(std::shared_ptr<Pump> pump);
     
@@ -38,10 +38,13 @@ public:
     void tare();
     DispenserState getState();
     float getLatestWeight();
+    float getAbsoluteWeight();
     void setAllValves(Valve::Position position);    
     void trimValve(int value);
     void resetTrimPositions();
     void selectValveForTrim(uint32_t valveId, Valve::Position position);
+    std::unique_ptr<HX711> scale_;
+    
 
 private:
     void resetDispensing_(bool skipCallback = false);
@@ -49,7 +52,7 @@ private:
     DispenseCompleteCallback completionCallback_;
     std::vector<std::shared_ptr<Valve>> valves_;
     std::vector<std::shared_ptr<Pump>> pumps_;
-    std::unique_ptr<HX711> scale_;
+    
     float targetWeight_;
     float latestWeight_;
     uint8_t valveIndex_;

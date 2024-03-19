@@ -34,7 +34,7 @@
 #define CH3_PIN 27
 #define LC_SCK 12 
 #define SERVO4_PIN LED_BUILTIN  //13
-const float calibration_factor = -438; //-438 worked for my 440lb max scale setup
+const float calibration_factor = 439; 
 
 // HX711 scale;
 uint8_t stationIdx = 0;
@@ -90,7 +90,7 @@ void setup() {
   SPI.begin(SCK_PIN, POCI_MISO_PIN, PICO_MOSI_PIN, CS_PIN);
 
   transport = std::make_shared<Transport>(HOME_SW_PIN, EN_PIN, CS_PIN);
-  dispenser = std::make_shared<Dispenser>(LC_DAT, LC_SCK, calibration_factor , 444.0);
+  dispenser = std::make_shared<Dispenser>(LC_DAT, LC_SCK, calibration_factor , 121.38);
   dispatcher = std::make_unique<Dispatcher>(dispenser, transport);
 
   transport->defineStation(12);  
@@ -100,7 +100,7 @@ void setup() {
   transport->defineStation(1759);
   transport->defineStation(2192);
   transport->defineStation(230); //Pumps
-  1
+  
   //Register Valves
   dispenser->registerValve(std::make_shared<Valve>(SERVO0_PIN));
   dispenser->registerValve(std::make_shared<Valve>(SERVO4_PIN));
@@ -118,13 +118,14 @@ void setup() {
 ledMan = std::make_unique<LedManager>(SDA);
 
 
+ledMan->setAllLeds(CRGB(10,10,10));
 transport->refMachine([](bool success) {    
     Serial.println("[main][refMachineCB] Machine Homed + Scale Tared");
 });
 
 Serial.println("[main][setup] Done");
 
-ledMan->setAllLeds(CRGB(0,0,50));
+
   // ledMan->fadeTo(CRGB(0,0,0), CRGB(0,0,50), 1000);
 }
 
@@ -136,9 +137,18 @@ void loop() {
   ledMan->heartbeat();
 
 
-  ledMan->trackTray(transport->getCurrentPosition(), CRGB(0,255,255), CRGB(0,0,20));
 
 
+  Dispatcher::DispatcherState state = dispatcher->getState();
+  if (state == Dispatcher::DispatcherState::NO_CUP) {
+    ledMan->setAllLeds(CRGB(0,0,10));
+  } else if (state == Dispatcher::DispatcherState::READY) {
+    ledMan->setAllLeds(CRGB(0,60,0));
+  } else if (state == Dispatcher::DispatcherState::AWAITING_REMOVAL) { 
+    ledMan->trackTray(transport->getCurrentPosition(), CRGB(0,255,0), CRGB(0,0,20));  
+  } else  {
+    ledMan->trackTray(transport->getCurrentPosition(), CRGB(0,255,255), CRGB(0,0,20));  
+  }
 
   uint32_t now = millis(); 
     
@@ -149,6 +159,14 @@ void loop() {
      case '?':
         Serial.println(transport->getCurrentPosition());
         break;
+      case ',':
+        dispenser->scale_->set_scale(dispenser->scale_->get_scale() - 10);
+        Serial.println(String(dispenser->scale_->get_scale()) + " = " + String(dispenser->scale_->get_units()));
+        break;
+      case '.':
+        dispenser->scale_->set_scale(dispenser->scale_->get_scale() + 10);
+        Serial.println(String(dispenser->scale_->get_scale()) + " = " + String(dispenser->scale_->get_units()));
+        break;        
       case '<': 
        Serial.println("[main][loop] Left");
         transport->moveStepsLeft(20);
@@ -158,18 +176,10 @@ void loop() {
         transport->moveStepsRight(20);
         break;
       case 'B':
-      if (dispatcher->getState() == Dispatcher::DispatcherState::READY) {        
-        // dispatcher->addStep(1, 50.0-(50 *.08));   
-        // dispatcher->addStep(2, 50.0-(50 *.08));   
-        // dispatcher->addStep(3, 100.0-(100 *.08));   
-        // dispatcher->addStep(Dispenser::DispenseType::VALVE, 4, 4, 50.0);
-        // dispatcher->addStep(Dispenser::DispenseType::VALVE, 6, 6, 50.0);        
-        dispatcher->addStep(Dispenser::DispenseType::PUMP, 1, 7, 50.0);  //Pump 1 / Station 7
+      if (dispatcher->getState() == Dispatcher::DispatcherState::READY) {                
         dispatcher->addStep(Dispenser::DispenseType::VALVE, 1, 1, 50.0);  //Pump 1 / Station 7
         dispatcher->addStep(Dispenser::DispenseType::VALVE, 2, 2, 50.0);  //Pump 1 / Station 7
-        dispatcher->addStep(Dispenser::DispenseType::VALVE, 6, 6, 50.0);  //Pump 1 / Station 7
-        // dispatcher->addStep(6, 50.0-(50 *.08));   
-        // dispatcher->addStep(2, 50.0-(50 *.08));
+        dispatcher->addStep(Dispenser::DispenseType::VALVE, 6, 6, 50.0);  //Pump 1 / Station 7        
         dispatcher->start();
       } else {
         Serial.println("[main][loop] Dispatcher not ready.");
@@ -228,6 +238,12 @@ void loop() {
         break;
       case 'P':
         transport->goToStation(7);
+        break;
+      case 'S':
+        Serial.println("[main][loop] Weight: " + String(dispenser->getLatestWeight()));
+        break;
+      case 'A':
+        Serial.println("[main][loop] Absolute Weight: " + String(dispenser->getAbsoluteWeight()));
         break;
       
       default:        

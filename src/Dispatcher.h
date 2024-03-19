@@ -9,12 +9,14 @@ class Dispatcher
 {
 public:   
     enum class DispatcherState {
+        NO_CUP,
         READY,
         MOVING,
         SERVING,
         AWAITING_END_DELAY,
         AWAITING_START_DELAY,
         STEP_COMPLETE,
+        AWAITING_REMOVAL,
         JOB_COMPLETE,
     };
 
@@ -39,6 +41,7 @@ void clearSteps();
 void addStep(Dispenser::DispenseType type, uint8_t index, uint8_t stationIndex, float targetWeight);
 bool start();
 void cancel();
+bool isServing();
 DispatcherState getState();
     
         
@@ -47,6 +50,7 @@ private:
     void servingPhase_();
     void awaitingEndDelayPhase_();
     void awaitingStartDelayPhase_();
+    void awaitingRemovalPhase_();
     void jobCompletePhase_();
     void performNextStep_(); 
     void reset_();

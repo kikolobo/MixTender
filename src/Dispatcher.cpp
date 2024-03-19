@@ -2,9 +2,18 @@
 
 
 void Dispatcher::heartbeat() {
+    
     switch (state_)
     {
+    case DispatcherState::NO_CUP:
+        if (dispenser_->getAbsoluteWeight() > 10.0) {
+            state_ = DispatcherState::READY;        
+        }
+        break;
     case DispatcherState::READY:
+       if (dispenser_->getAbsoluteWeight() <= 3.0) {
+            state_ = DispatcherState::NO_CUP;
+        }
         break;
     case DispatcherState::MOVING:
         movingPhase_();
@@ -17,6 +26,9 @@ void Dispatcher::heartbeat() {
         break;            
     case DispatcherState::STEP_COMPLETE:
         cumulativeWeight_ += dispenser_->getLatestWeight();
+        break;
+    case DispatcherState::AWAITING_REMOVAL:
+        awaitingRemovalPhase_();
         break;
     case DispatcherState::JOB_COMPLETE:
         jobCompletePhase_();
@@ -50,14 +62,24 @@ void Dispatcher::awaitingEndDelayPhase_() {
         state_ = DispatcherState::STEP_COMPLETE;
         steps_[currentStep_].stepCompleted = true;
         currentStep_++;
-        if (currentStep_ >= steps_.size()-1) {
+        if (currentStep_ >= steps_.size()) {
             Serial.println("[Dispatcher][awaitingDelayPhase_] All steps complete.");
-            state_ = DispatcherState::JOB_COMPLETE;
+            state_ = DispatcherState::AWAITING_REMOVAL;
             transport_->goPark();
         }
         else {
            performNextStep_();
         }
+    }
+}
+
+void Dispatcher::awaitingRemovalPhase_() {
+    if (transport_->isParked()) {
+        if (dispenser_->getAbsoluteWeight() < 2.0) {
+            Serial.println("[Dispatcher][awaitingRemovalPhase_] Cup Removed. Job complete.");
+            state_ = DispatcherState::JOB_COMPLETE;
+            return;
+        }        
     }
 }
 
@@ -67,6 +89,7 @@ void Dispatcher::jobCompletePhase_() {
         reset_();
     }
 }
+
 
 void Dispatcher::cancel() {
     Serial.println("[Dispatcher][cancel] Cancelling job.");
@@ -78,7 +101,7 @@ void Dispatcher::cancel() {
 void Dispatcher::reset_() {
         Serial.println("[Dispatcher][reset_] Job complete: " + String(steps_.size()) + " steps executed in " + String(millis() - jobBeginTimeStampMS_) + "ms.");
         steps_.clear();
-        state_ = DispatcherState::READY;        
+        state_ = DispatcherState::NO_CUP;
         currentStep_ = 0;
         cumulativeWeight_ = 0.0;
         jobBeginTimeStampMS_ = 0;
@@ -122,8 +145,7 @@ bool Dispatcher::start() {
     
     Serial.println("[Dispatcher][start] Performing first step: " + String(currentStep_) + " of " + String(steps_.size()-1));
     Serial.println("[Dispatcher][start] Start weight: " + String(dispenser_->getLatestWeight()) + "g");
-
-    // dispenser_->tare();
+    
     transport_->goToStation(steps_[currentStep_].stationIndex);
     steps_[currentStep_].beginMovementTimeStampMS = millis();
     state_ = DispatcherState::MOVING;
@@ -133,6 +155,13 @@ bool Dispatcher::start() {
 
 Dispatcher::DispatcherState Dispatcher::getState() {
     return state_;
+}
+
+bool Dispatcher::isServing() {
+    if (state_ == DispatcherState::NO_CUP || state_ == DispatcherState::READY || state_ == DispatcherState::READY || state_ == DispatcherState::JOB_COMPLETE || state_ == DispatcherState::AWAITING_REMOVAL) {
+        return false;
+    }
+    return true;
 }
 
 Dispatcher::Dispatcher(std::shared_ptr<Dispenser> dispenser, std::shared_ptr<Transport> transport) {
