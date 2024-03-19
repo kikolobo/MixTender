@@ -37,7 +37,7 @@ void Dispatcher::movingPhase_() {
 }
 
 void Dispatcher::servingPhase_() {
-    if (dispenser_->getState() == Dispenser::DispenserState::READY) {
+    if (dispenser_->getState() == Dispenser::DispenserState::FINISHED) {
         Serial.println("[Dispatcher][servingPhase_] Dispensing Complete.");
         state_ = DispatcherState::AWAITING_END_DELAY;
         steps_[currentStep_].endDispensingTimeStampMS = millis();
@@ -50,7 +50,7 @@ void Dispatcher::awaitingEndDelayPhase_() {
         state_ = DispatcherState::STEP_COMPLETE;
         steps_[currentStep_].stepCompleted = true;
         currentStep_++;
-        if (currentStep_ >= steps_.size()) {
+        if (currentStep_ >= steps_.size()-1) {
             Serial.println("[Dispatcher][awaitingDelayPhase_] All steps complete.");
             state_ = DispatcherState::JOB_COMPLETE;
             transport_->goPark();
@@ -77,8 +77,8 @@ void Dispatcher::cancel() {
 
 void Dispatcher::reset_() {
         Serial.println("[Dispatcher][reset_] Job complete: " + String(steps_.size()) + " steps executed in " + String(millis() - jobBeginTimeStampMS_) + "ms.");
-        state_ = DispatcherState::READY;
         steps_.clear();
+        state_ = DispatcherState::READY;        
         currentStep_ = 0;
         cumulativeWeight_ = 0.0;
         jobBeginTimeStampMS_ = 0;
@@ -123,7 +123,7 @@ bool Dispatcher::start() {
     Serial.println("[Dispatcher][start] Performing first step: " + String(currentStep_) + " of " + String(steps_.size()-1));
     Serial.println("[Dispatcher][start] Start weight: " + String(dispenser_->getLatestWeight()) + "g");
 
-    dispenser_->tare();
+    // dispenser_->tare();
     transport_->goToStation(steps_[currentStep_].stationIndex);
     steps_[currentStep_].beginMovementTimeStampMS = millis();
     state_ = DispatcherState::MOVING;

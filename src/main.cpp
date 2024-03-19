@@ -99,15 +99,14 @@ void setup() {
   transport->defineStation(1309);
   transport->defineStation(1759);
   transport->defineStation(2192);
-
-  transport->defineStation(650); //Pumps
-  
+  transport->defineStation(230); //Pumps
+  1
   //Register Valves
   dispenser->registerValve(std::make_shared<Valve>(SERVO0_PIN));
-  dispenser->registerValve(std::make_shared<Valve>(SERVO1_PIN));
+  dispenser->registerValve(std::make_shared<Valve>(SERVO4_PIN));
   dispenser->registerValve(std::make_shared<Valve>(SERVO2_PIN));
   dispenser->registerValve(std::make_shared<Valve>(SERVO3_PIN));
-  dispenser->registerValve(std::make_shared<Valve>(SERVO4_PIN));
+  dispenser->registerValve(std::make_shared<Valve>(SERVO1_PIN));
   dispenser->registerValve(std::make_shared<Valve>(SERVO5_PIN));
 
   //Register Pumps
@@ -163,9 +162,12 @@ void loop() {
         // dispatcher->addStep(1, 50.0-(50 *.08));   
         // dispatcher->addStep(2, 50.0-(50 *.08));   
         // dispatcher->addStep(3, 100.0-(100 *.08));   
-        dispatcher->addStep(Dispenser::DispenseType::VALVE, 4, 4, 50.0);
-        dispatcher->addStep(Dispenser::DispenseType::VALVE, 6, 6, 50.0);
+        // dispatcher->addStep(Dispenser::DispenseType::VALVE, 4, 4, 50.0);
+        // dispatcher->addStep(Dispenser::DispenseType::VALVE, 6, 6, 50.0);        
         dispatcher->addStep(Dispenser::DispenseType::PUMP, 1, 7, 50.0);  //Pump 1 / Station 7
+        dispatcher->addStep(Dispenser::DispenseType::VALVE, 1, 1, 50.0);  //Pump 1 / Station 7
+        dispatcher->addStep(Dispenser::DispenseType::VALVE, 2, 2, 50.0);  //Pump 1 / Station 7
+        dispatcher->addStep(Dispenser::DispenseType::VALVE, 6, 6, 50.0);  //Pump 1 / Station 7
         // dispatcher->addStep(6, 50.0-(50 *.08));   
         // dispatcher->addStep(2, 50.0-(50 *.08));
         dispatcher->start();
@@ -223,6 +225,9 @@ void loop() {
         break;
       case '@':
         dispenser->resetTrimPositions();
+        break;
+      case 'P':
+        transport->goToStation(7);
         break;
       
       default:        

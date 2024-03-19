@@ -16,6 +16,7 @@ public:
         AWAITING_CLOSURE,
         AWAITING_STABILITY,
         STABLE,
+        FINISHED,
     };
 
     enum class DispenseType {
