@@ -112,13 +112,11 @@ void BluetoothEngine::notifyStatus(std::string status) {
 
 
 void BluetoothEngine::sendData(std::string txString) {  
-    if (isConnected == false) {
-        Serial.println("[BluetoothEngine] Not connected. Ignoring: " + String(txString.c_str()));
+    if (isConnected == false) {        
         return;
     }
 
-    if (txString == sentData) {
-        Serial.println("[BluetoothEngine] Duplicate TXD. Ignoring : " + String(txString.c_str()));
+    if (txString == sentData) {     
         return;
     }
 

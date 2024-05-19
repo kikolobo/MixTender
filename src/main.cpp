@@ -64,6 +64,7 @@ void willBeginDispensing(uint8_t step);
 void didFinishDispensing(uint8_t step);
 void didUpdateWeight(uint8_t step, float weight);
 void didFinishJob();
+void isReady();
 
 void setup() {
   
@@ -133,6 +134,7 @@ void setup() {
   dispatcher->setDidFinishDispensingCallback(didFinishDispensing);
   dispatcher->setDidUpdateWeight(didUpdateWeight);
   dispatcher->setDidFinishJob(didFinishJob);
+  dispatcher->setIsReady(isReady);
   
 
 Serial.println("[INITIALIZING LED MANAGER]");
@@ -178,12 +180,11 @@ void loop() {
     if (machineIsBooted == true) {      
       Dispatcher::DispatcherState state = dispatcher->getState();
       if (state == Dispatcher::DispatcherState::NO_CUP) {                             
-            ledMan->fadeTo(ledMan->getCurrentColor(), CRGB(0,0,100), 300);                   
+            ledMan->fadeTo(ledMan->getCurrentColor(), CRGB(0,0,100), 200);                   
       } else if (state == Dispatcher::DispatcherState::READY) {                
-            ledMan->fadeTo(ledMan->getCurrentColor(), CRGB(0,100,0), 800);     
+            ledMan->fadeTo(ledMan->getCurrentColor(), CRGB(0,100,0), 350);     
             ble->notifyStatus("Ready!");
-      } else if (state == Dispatcher::DispatcherState::AWAITING_REMOVAL) { 
-        ble->notifyStatus("Get your drink!");
+      } else if (state == Dispatcher::DispatcherState::AWAITING_REMOVAL) {         
         ledMan->trackTray(transport->getCurrentPosition(), CRGB(0,255,0), CRGB(10,10,10));        
       } else if (dispatcher->isServing() == true) {
         ledMan->trackTray(transport->getCurrentPosition(), CRGB(0,255,255), CRGB(0,0,20));          
@@ -302,24 +303,28 @@ if (Serial.available() > 0) {  // Check if data is available to read
 }
 
 void willBeginDispensing(uint8_t step) {
-  Serial.println("[main][willBeginDispensing] Step: " + String(step));
+  Serial.println("[main][willBeginDispensingCallback] Step: " + String(step));
   ble->notifyStateIsProcessing(step);
-  ble->notifyStatus("Making Drink!");
+  ble->notifyStatus("Still Working!");
 }
 
 void didFinishDispensing(uint8_t step) {
   ble->notifyStateIsComplete(step);
-  Serial.println("[main][didFinishDispensing] Step: " + String(step));  
+  Serial.println("[main][didFinishDispensingCallback] Step: " + String(step));  
 }
 
 void didUpdateWeight(uint8_t step, float weight) {
-  ble->notifyWeightUpdate(step, weight);
-  Serial.println("[main][didUpdateWeight] Step: " + String(step) + " Weight: " + String(weight));
+  ble->notifyWeightUpdate(step, weight);  
 }
 
 void didFinishJob() {
-  Serial.println("[main][didFinishJob] Job Complete");
-  ble->notifyStatus("Wait a sec!");
+  Serial.println("[main][didFinishJobCallback] Job Complete");  
+  ble->notifyStatus("Get your drink!");
+}
+
+void isReady() {
+  Serial.println("[main][isReadyCallback] Ready");
+  ble->notifyStatus("Ready!");
 }
 
 
@@ -334,14 +339,24 @@ void handleBleRequests() {
     Serial.println("[Main][handleBleRequests] Received: " + String(rxdData_.c_str()));
     if (parseBleRequestToDispatcher(rxdData_) == true) {
       if (dispatcher->getState() == Dispatcher::DispatcherState::NO_CUP) {
-        ble->notifyStatus("No Cup Detected");
+        ble->notifyStatus("No Cup! Please add a cup!");
         return;
       }
-
+      ble->notifyStatus("Making your drink!");
       dispatcher->start();
-    } else {
-      Serial.println("[Main][handleBleRequests] Invalid Request: " + String(rxdData_.c_str()));
-    }                
+    } else if (rxdData_ == "C!") {
+      Serial.println("[Main][handleBleRequests] Cancel Request Received");
+      dispatcher->cancel();
+    } else if (rxdData_ == "ehlo") {
+      Serial.println("[Main][handleBleRequests] Ping Received");
+      CRGB currentColor = ledMan->getCurrentColor();
+      ledMan->setAllLeds(CRGB(50,50,50));
+      delay(300);
+      ledMan->setAllLeds(currentColor);      
+      
+    }  else {
+      Serial.println("[Main][handleBleRequests] Invalid Request Received: " + String(rxdData_.c_str()));
+    }              
   }
   
 }

@@ -71,12 +71,12 @@ void Dispatcher::awaitingEndDelayPhase_() {
         }
         currentStep_++;
         if (currentStep_ >= steps_.size()) {
-            Serial.println("[Dispatcher][awaitingDelayPhase_] All steps complete.");
+            Serial.println("[Dispatcher][awaitingDelayPhase_] All steps complete.");            
+            state_ = DispatcherState::AWAITING_REMOVAL;            
+            transport_->goPark(); 
             if (didFinishJobCallback_) {
                 didFinishJobCallback_();
-            }
-            state_ = DispatcherState::AWAITING_REMOVAL;
-            transport_->goPark();            
+            }           
         }  else {
            performNextStep_();
         }
@@ -86,10 +86,13 @@ void Dispatcher::awaitingEndDelayPhase_() {
 void Dispatcher::awaitingRemovalPhase_() {
     if (transport_->isParked()) {
         if (dispenser_->getAbsoluteWeight() < 2.0) {
-            Serial.println("[Dispatcher][awaitingRemovalPhase_] Cup Removed. Job complete.");
+            Serial.println("[Dispatcher][awaitingRemovalPhase_] Cup Removed. Job complete.");            
             state_ = DispatcherState::JOB_COMPLETE;
+            if (isReadyCallback_) {
+                isReadyCallback_();
+            }
             return;
-        }        
+        }                    
     }
 }
 
@@ -210,4 +213,7 @@ void Dispatcher::setDidFinishJob(DidFinishJob callback) {
     didFinishJobCallback_ = callback;
 }
 
+void Dispatcher::setIsReady(IsReady callback) {
+    isReadyCallback_ = callback;
+}
 

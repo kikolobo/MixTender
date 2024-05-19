@@ -48,6 +48,7 @@ using WillBeginDispensing = std::function<void(const uint8_t&)>;
 using DidFinishDispensing =  std::function<void(const uint8_t&)>;
 using DidUpdateWeight =  std::function<void(const uint8_t&, float weight)>;
 using DidFinishJob =  std::function<void()>;
+using IsReady =  std::function<void()>;
 
 Dispatcher(std::shared_ptr<Dispenser> dispenser, std::shared_ptr<Transport> transport);
 void heartbeat();
@@ -61,6 +62,7 @@ void setWillBeginDispensingCallback(WillBeginDispensing callback);
 void setDidFinishDispensingCallback(DidFinishDispensing callback);
 void setDidUpdateWeight(DidUpdateWeight callback);
 void setDidFinishJob(DidFinishJob callback);
+void setIsReady(IsReady callback);
 
 DispatcherState getState();
 StepStatus getStepStatus();
@@ -83,6 +85,7 @@ private:
     DidFinishDispensing didFinishDispensingCallback_;
     DidUpdateWeight didUpdateWeightCallback_;
     DidFinishJob didFinishJobCallback_;
+    IsReady isReadyCallback_;
 
     std::vector<Steps> steps_;
     DispatcherState state_;
