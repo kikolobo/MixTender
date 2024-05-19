@@ -54,6 +54,11 @@ void Dispatcher::servingPhase_() {
         state_ = DispatcherState::AWAITING_END_DELAY;
         steps_[currentStep_].endDispensingTimeStampMS = millis();
     }
+
+    if (didUpdateWeightCallback_) {
+            didUpdateWeightCallback_(currentStep_, dispenser_->getLatestWeight());
+    }
+    
 }
 
 void Dispatcher::awaitingEndDelayPhase_() {
@@ -61,13 +66,18 @@ void Dispatcher::awaitingEndDelayPhase_() {
         Serial.println("[Dispatcher][awaitingDelayPhase_] Delay complete.");
         state_ = DispatcherState::STEP_COMPLETE;
         steps_[currentStep_].stepCompleted = true;
+         if (didFinishDispensingCallback_) {
+            didFinishDispensingCallback_(currentStep_);
+        }
         currentStep_++;
         if (currentStep_ >= steps_.size()) {
             Serial.println("[Dispatcher][awaitingDelayPhase_] All steps complete.");
+            if (didFinishJobCallback_) {
+                didFinishJobCallback_();
+            }
             state_ = DispatcherState::AWAITING_REMOVAL;
-            transport_->goPark();
-        }
-        else {
+            transport_->goPark();            
+        }  else {
            performNextStep_();
         }
     }
@@ -84,7 +94,7 @@ void Dispatcher::awaitingRemovalPhase_() {
 }
 
 void Dispatcher::jobCompletePhase_() {    
-    if (transport_->isParked()) {
+    if (transport_->isParked()) {        
         Serial.println("[Dispatcher][jobCompletePhase_] Job is complete. Clearing Recepie.");
         reset_();
     }
@@ -95,7 +105,7 @@ void Dispatcher::cancel() {
     Serial.println("[Dispatcher][cancel] Cancelling job.");
     dispenser_->abortDispensing();
     transport_->goPark();
-    state_ = DispatcherState::JOB_COMPLETE;
+    state_ = DispatcherState::JOB_COMPLETE;    
 }
 
 void Dispatcher::reset_() {
@@ -112,6 +122,9 @@ void Dispatcher::performNextStep_() {
         transport_->goToStation(steps_[currentStep_].index);
         steps_[currentStep_].beginMovementTimeStampMS = millis();        
         state_ = DispatcherState::MOVING;
+        if (willBeginDispensingCallback_) {
+            willBeginDispensingCallback_(currentStep_);
+        }
 }
 
 void Dispatcher::clearSteps() {
@@ -157,8 +170,19 @@ Dispatcher::DispatcherState Dispatcher::getState() {
     return state_;
 }
 
+Dispatcher::StepStatus Dispatcher::getStepStatus() {
+    StepStatus status;
+    status.index = currentStep_;
+    status.stationIndex = steps_[currentStep_].stationIndex;
+    status.targetWeight = steps_[currentStep_].targetWeight;
+    status.dispensedWeight = dispenser_->getLatestWeight();
+    status.state = state_;
+    status.stepCompleted = steps_[currentStep_].stepCompleted;
+    return status;
+}
+
 bool Dispatcher::isServing() {
-    if (state_ == DispatcherState::NO_CUP || state_ == DispatcherState::READY || state_ == DispatcherState::READY || state_ == DispatcherState::JOB_COMPLETE || state_ == DispatcherState::AWAITING_REMOVAL) {
+    if (state_ == DispatcherState::NO_CUP || state_ == DispatcherState::READY || state_ == DispatcherState::JOB_COMPLETE || state_ == DispatcherState::AWAITING_REMOVAL) {
         return false;
     }
     return true;
@@ -169,4 +193,21 @@ Dispatcher::Dispatcher(std::shared_ptr<Dispenser> dispenser, std::shared_ptr<Tra
     transport_ = transport;
     state_ = DispatcherState::READY;
 };
+
+void Dispatcher::setWillBeginDispensingCallback(WillBeginDispensing callback) {
+    willBeginDispensingCallback_ = callback;
+}
+
+void Dispatcher::setDidFinishDispensingCallback(DidFinishDispensing callback) {
+    didFinishDispensingCallback_ = callback;
+}
+
+void Dispatcher::setDidUpdateWeight(DidUpdateWeight callback) {
+    didUpdateWeightCallback_ = callback;
+}
+
+void Dispatcher::setDidFinishJob(DidFinishJob callback) {
+    didFinishJobCallback_ = callback;
+}
+
 

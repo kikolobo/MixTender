@@ -26,22 +26,24 @@ void fadeTo(CRGB startColor, CRGB targetColor, int durationMS);
 void setRange(uint8_t start, uint8_t end, CRGB color);
 void trackTray(uint32_t position, CRGB color, CRGB backgroundColor);
 void fadeShow();
+bool fadedComplete();
+bool isFading();
 CRGB getCurrentColor() { return currentColor_; }
+FX getCurrentFX() { return currentFX_; }
    
         
 private:    
     uint8_t calculateBrightness_(CRGB color);
     void performFade_();
-
-
     int numLeds_;
     uint8_t dataPin_;  
     int prevTimeStamp_; 
     CRGB leds_[76];
     CRGB backgroundColor_;
-    FX currentFX_;
+    FX currentFX_ = FX::NONE;
     uint32_t FXdurationMS_;
     uint32_t FXPeriodMS_;
+    uint32_t startTimestamp_;
     CRGB startColor_;
     CRGB targetColor_;
     CRGB currentColor_; 

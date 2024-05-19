@@ -20,6 +20,16 @@ public:
         JOB_COMPLETE,
     };
 
+    struct StepStatus
+    {
+        uint8_t index;
+        uint8_t stationIndex;
+        float targetWeight;
+        float dispensedWeight;
+        bool stepCompleted = false;
+        DispatcherState state;        
+    };
+
 
     struct Steps
     {
@@ -34,6 +44,10 @@ public:
     };
     
 
+using WillBeginDispensing = std::function<void(const uint8_t&)>;
+using DidFinishDispensing =  std::function<void(const uint8_t&)>;
+using DidUpdateWeight =  std::function<void(const uint8_t&, float weight)>;
+using DidFinishJob =  std::function<void()>;
 
 Dispatcher(std::shared_ptr<Dispenser> dispenser, std::shared_ptr<Transport> transport);
 void heartbeat();
@@ -42,7 +56,14 @@ void addStep(Dispenser::DispenseType type, uint8_t index, uint8_t stationIndex, 
 bool start();
 void cancel();
 bool isServing();
+
+void setWillBeginDispensingCallback(WillBeginDispensing callback);
+void setDidFinishDispensingCallback(DidFinishDispensing callback);
+void setDidUpdateWeight(DidUpdateWeight callback);
+void setDidFinishJob(DidFinishJob callback);
+
 DispatcherState getState();
+StepStatus getStepStatus();
     
         
 private:    
@@ -57,6 +78,11 @@ private:
 
     std::shared_ptr<Dispenser> dispenser_;
     std::shared_ptr<Transport> transport_;
+
+    WillBeginDispensing willBeginDispensingCallback_;
+    DidFinishDispensing didFinishDispensingCallback_;
+    DidUpdateWeight didUpdateWeightCallback_;
+    DidFinishJob didFinishJobCallback_;
 
     std::vector<Steps> steps_;
     DispatcherState state_;

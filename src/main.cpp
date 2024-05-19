@@ -1,4 +1,8 @@
-#include "Arduino.h"
+#include <iostream>
+#include <vector>
+#include <cstring>
+#include <Arduino.h>
+
 #include "SPI.h"
 #include <TMC5160.h>
 #include "HX711.h"
@@ -7,12 +11,7 @@
 #include "Dispenser.h"
 #include "Dispatcher.h"
 #include "LedManager.h"
-// #include <FastLED.h>
-
-// #define NUM_LEDS 75
-// #define DATA_PIN SDA
-
-// CRGB leds[NUM_LEDS];
+#include "BluetoothEngine.h"
 
 
 #define HOME_SW_PIN 37
@@ -40,6 +39,7 @@ const float calibration_factor = 439;
 uint8_t stationIdx = 0;
 
 uint32_t servoAdjustValue_ = 0;
+bool machineIsBooted = false;
 
 static unsigned long t_dirchange, lc_update, t_echo;
 
@@ -48,6 +48,22 @@ std::shared_ptr<Dispenser> dispenser;
 std::unique_ptr<Dispatcher> dispatcher;
 std::unique_ptr<LedManager> ledMan;
 
+BluetoothEngine *ble;
+
+
+std::string rxdData;
+bool didReceiveData = false;
+bool isConnected = false;
+
+void handleBleRequests();
+void handleSerialRequests();
+bool parseBleRequestToDispatcher(const std::string& rxdData);
+
+//Callbacks from dispatcher (prototypes)
+void willBeginDispensing(uint8_t step);
+void didFinishDispensing(uint8_t step);
+void didUpdateWeight(uint8_t step, float weight);
+void didFinishJob();
 
 void setup() {
   
@@ -75,15 +91,11 @@ void setup() {
   pinMode(AX1, INPUT); //INPUT ONLY!
   pinMode(AX2, INPUT); //INPUT ONLY!
   
-
+  digitalWrite(CH1_PIN, LOW);
+  digitalWrite(CH2_PIN, LOW);
+  digitalWrite(CH3_PIN, LOW);
   
-  //  FastLED.addLeds<NEOPIXEL, DATA_PIN>(leds, NUM_LEDS);  // GRB ordering is assumed
-   
-
-   digitalWrite(CH1_PIN, LOW);
-   digitalWrite(CH2_PIN, LOW);
-   digitalWrite(CH3_PIN, LOW);
-
+ 
   Serial.println("# LoboLabs MixTender V1.0 - Dec 2023");
   Serial.println("[main][setup] Initializing System...");
 
@@ -93,6 +105,7 @@ void setup() {
   dispenser = std::make_shared<Dispenser>(LC_DAT, LC_SCK, calibration_factor , 121.38);
   dispatcher = std::make_unique<Dispatcher>(dispenser, transport);
 
+  Serial.println("[INITIALIZING TRASNPORT]");
   transport->defineStation(12);  
   transport->defineStation(426);
   transport->defineStation(875);
@@ -102,6 +115,7 @@ void setup() {
   transport->defineStation(230); //Pumps
   
   //Register Valves
+  Serial.println("[INITIALIZING DISPENSER]");
   dispenser->registerValve(std::make_shared<Valve>(SERVO0_PIN));
   dispenser->registerValve(std::make_shared<Valve>(SERVO4_PIN));
   dispenser->registerValve(std::make_shared<Valve>(SERVO2_PIN));
@@ -114,45 +128,79 @@ void setup() {
   dispenser->registerPump(std::make_shared<Pump>(CH2_PIN));
   dispenser->registerPump(std::make_shared<Pump>(CH3_PIN));
 
+  Serial.println("[INITIALIZING DISPATCHER]");
+  dispatcher->setWillBeginDispensingCallback(willBeginDispensing);
+  dispatcher->setDidFinishDispensingCallback(didFinishDispensing);
+  dispatcher->setDidUpdateWeight(didUpdateWeight);
+  dispatcher->setDidFinishJob(didFinishJob);
+  
 
+Serial.println("[INITIALIZING LED MANAGER]");
 ledMan = std::make_unique<LedManager>(SDA);
-
-
 ledMan->setAllLeds(CRGB(10,10,10));
+
+Serial.println("[INITIALIZING BLUETOOTH ENGINE]");
+  ble = new BluetoothEngine();    
+
+  ble->setDidReceiveCallback([](std::string data) {              
+          rxdData = data;
+          didReceiveData = true;                     
+  });
+
+  ble->setDidConnectCallback([]() {        
+      isConnected = true;
+  });
+
+  ble->setDidDisconnectConnectCallback([]() {        
+      isConnected = false;
+  });
+
+
 transport->refMachine([](bool success) {    
-    Serial.println("[main][refMachineCB] Machine Homed + Scale Tared");
+    machineIsBooted = true;
+    Serial.println("[main][refMachineCB] Machine Homed");
 });
 
 Serial.println("[main][setup] Done");
 
 
-  // ledMan->fadeTo(CRGB(0,0,0), CRGB(0,0,50), 1000);
+ledMan->fadeTo(CRGB(0,0,0), CRGB(100,0,0), 1000);
 }
 
-
-void loop() {
+void loop() {  
   transport->heartbeat(); 
   dispenser->heartbeat();
   dispatcher->heartbeat();
+  ble->heartbeat();
   ledMan->heartbeat();
+  
 
+    if (machineIsBooted == true) {      
+      Dispatcher::DispatcherState state = dispatcher->getState();
+      if (state == Dispatcher::DispatcherState::NO_CUP) {                             
+            ledMan->fadeTo(ledMan->getCurrentColor(), CRGB(0,0,100), 300);                   
+      } else if (state == Dispatcher::DispatcherState::READY) {                
+            ledMan->fadeTo(ledMan->getCurrentColor(), CRGB(0,100,0), 800);     
+            ble->notifyStatus("Ready!");
+      } else if (state == Dispatcher::DispatcherState::AWAITING_REMOVAL) { 
+        ble->notifyStatus("Get your drink!");
+        ledMan->trackTray(transport->getCurrentPosition(), CRGB(0,255,0), CRGB(10,10,10));        
+      } else if (dispatcher->isServing() == true) {
+        ledMan->trackTray(transport->getCurrentPosition(), CRGB(0,255,255), CRGB(0,0,20));          
+      }     
+    }
 
-
-
-  Dispatcher::DispatcherState state = dispatcher->getState();
-  if (state == Dispatcher::DispatcherState::NO_CUP) {
-    ledMan->setAllLeds(CRGB(0,0,10));
-  } else if (state == Dispatcher::DispatcherState::READY) {
-    ledMan->setAllLeds(CRGB(0,60,0));
-  } else if (state == Dispatcher::DispatcherState::AWAITING_REMOVAL) { 
-    ledMan->trackTray(transport->getCurrentPosition(), CRGB(0,255,0), CRGB(0,0,20));  
-  } else  {
-    ledMan->trackTray(transport->getCurrentPosition(), CRGB(0,255,255), CRGB(0,0,20));  
-  }
-
+  handleSerialRequests();
+  handleBleRequests();
+ 
   uint32_t now = millis(); 
     
-  if (Serial.available() > 0) {  // Check if data is available to read
+      
+}
+
+
+void handleSerialRequests() {
+if (Serial.available() > 0) {  // Check if data is available to read
     auto receivedChar = Serial.read(); // Read the incoming byte
     // Serial.print((int)receivedChar);
     switch (receivedChar) {       
@@ -251,5 +299,105 @@ void loop() {
     }    
         
   }
-      
+}
+
+void willBeginDispensing(uint8_t step) {
+  Serial.println("[main][willBeginDispensing] Step: " + String(step));
+  ble->notifyStateIsProcessing(step);
+  ble->notifyStatus("Making Drink!");
+}
+
+void didFinishDispensing(uint8_t step) {
+  ble->notifyStateIsComplete(step);
+  Serial.println("[main][didFinishDispensing] Step: " + String(step));  
+}
+
+void didUpdateWeight(uint8_t step, float weight) {
+  ble->notifyWeightUpdate(step, weight);
+  Serial.println("[main][didUpdateWeight] Step: " + String(step) + " Weight: " + String(weight));
+}
+
+void didFinishJob() {
+  Serial.println("[main][didFinishJob] Job Complete");
+  ble->notifyStatus("Wait a sec!");
+}
+
+
+void handleBleRequests() {
+
+  std::string rxdData_ = rxdData;
+  if (didReceiveData == true) {
+    
+    didReceiveData = false;
+    rxdData = "";
+
+    Serial.println("[Main][handleBleRequests] Received: " + String(rxdData_.c_str()));
+    if (parseBleRequestToDispatcher(rxdData_) == true) {
+      if (dispatcher->getState() == Dispatcher::DispatcherState::NO_CUP) {
+        ble->notifyStatus("No Cup Detected");
+        return;
+      }
+
+      dispatcher->start();
+    } else {
+      Serial.println("[Main][handleBleRequests] Invalid Request: " + String(rxdData_.c_str()));
+    }                
+  }
+  
+}
+
+
+bool parseBleRequestToDispatcher(const std::string& rxdData) {
+    std::vector<Dispatcher::Steps> steps;
+
+    // Find the position of the first ':'
+    size_t pos = rxdData.find(':');
+    if (pos == std::string::npos) {
+        // std::cerr << "Invalid input string format\n";
+        return false;
+    }
+
+    // Extract the command part (before ':')
+    std::string command = rxdData.substr(0, pos);
+    if (command != "D") {     
+        return false;
+    }
+
+    // Extract the remaining part (after ':')
+    std::string stepsPart = rxdData.substr(pos + 1);
+
+    // Tokenize the stepsPart by ','
+    char stepsCopy[256];
+    strncpy(stepsCopy, stepsPart.c_str(), sizeof(stepsCopy));
+    stepsCopy[sizeof(stepsCopy) - 1] = '\0'; // Ensure null termination
+
+    char* step = strtok(stepsCopy, ",");
+    dispatcher->clearSteps();
+    Serial.println("[main][parseBTRequestToDispatcher] --------------------------------->");
+    while (step != NULL) {
+        
+        char* equalPos = strchr(step, '=');
+        if (equalPos == NULL) {
+            Serial.println("Invalid step format");
+            return false;
+        }
+
+        // Extract StepID (index) and value
+        *equalPos = '\0';
+        int stepID = atoi(step);
+        double targetWeight = atof(equalPos + 1);
+
+
+        Dispenser::DispenseType stationType = Dispenser::DispenseType::VALVE;
+        if (stepID > 6) {
+            stationType = Dispenser::DispenseType::PUMP;
+        }
+
+        dispatcher->addStep(stationType, stepID, stepID, targetWeight);  
+        Serial.println("[main][parseBTRequestToDispatcher] Step Added: " + String(stepID) + " = " + String(targetWeight)); 
+        step = strtok(NULL, ",");
+    }
+
+    Serial.println("[main][parseBTRequestToDispatcher] ---------------------------------<");
+    return true;
 }
