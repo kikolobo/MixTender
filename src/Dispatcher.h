@@ -18,6 +18,7 @@ public:
         STEP_COMPLETE,
         AWAITING_REMOVAL,
         JOB_COMPLETE,
+        UNKNOWN,
     };
 
     struct StepStatus

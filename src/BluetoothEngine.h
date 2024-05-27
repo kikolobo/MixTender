@@ -28,7 +28,8 @@ public:
     void stopAdvertising();
     
     void sendData(std::string status);
-    void notifyStatus(std::string status);    
+    void notifyStatus(std::string status);
+    void notifyCupStatus(bool status);
     void notifyStateIsProcessing(uint8_t step);
     void notifyStateIsComplete(uint8_t step);
     void notifyWeightUpdate(uint8_t step, double weight);

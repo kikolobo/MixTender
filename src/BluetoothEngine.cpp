@@ -110,9 +110,16 @@ void BluetoothEngine::notifyStatus(std::string status) {
     sendData("$0=" + status);
 }
 
+void BluetoothEngine::notifyCupStatus(bool status) {
+    std::string statusStr = status ? "1" : "0";
+    
+    sendData("$1=" + statusStr);
+}
+
 
 void BluetoothEngine::sendData(std::string txString) {  
-    if (isConnected == false) {        
+    if (isConnected == false) {   
+        Serial.println("[BluetoothEngine] Not connected, skipping TXD: " + String(txString.c_str()));
         return;
     }
 

@@ -54,6 +54,7 @@ BluetoothEngine *ble;
 std::string rxdData;
 bool didReceiveData = false;
 bool isConnected = false;
+Dispatcher::DispatcherState lastState = Dispatcher::DispatcherState::UNKNOWN;
 
 void handleBleRequests();
 void handleSerialRequests();
@@ -65,6 +66,7 @@ void didFinishDispensing(uint8_t step);
 void didUpdateWeight(uint8_t step, float weight);
 void didFinishJob();
 void isReady();
+void updateCupState();
 
 void setup() {
   
@@ -169,6 +171,7 @@ Serial.println("[main][setup] Done");
 ledMan->fadeTo(CRGB(0,0,0), CRGB(100,0,0), 1000);
 }
 
+
 void loop() {  
   transport->heartbeat(); 
   dispenser->heartbeat();
@@ -177,26 +180,41 @@ void loop() {
   ledMan->heartbeat();
   
 
-    if (machineIsBooted == true) {      
-      Dispatcher::DispatcherState state = dispatcher->getState();
-      if (state == Dispatcher::DispatcherState::NO_CUP) {                             
-            ledMan->fadeTo(ledMan->getCurrentColor(), CRGB(0,0,100), 200);                   
-      } else if (state == Dispatcher::DispatcherState::READY) {                
-            ledMan->fadeTo(ledMan->getCurrentColor(), CRGB(0,100,0), 350);     
-            ble->notifyStatus("Ready!");
-      } else if (state == Dispatcher::DispatcherState::AWAITING_REMOVAL) {         
-        ledMan->trackTray(transport->getCurrentPosition(), CRGB(0,255,0), CRGB(10,10,10));        
-      } else if (dispatcher->isServing() == true) {
-        ledMan->trackTray(transport->getCurrentPosition(), CRGB(0,255,255), CRGB(0,0,20));          
-      }     
+    if (machineIsBooted == true) {   
+              
+        Dispatcher::DispatcherState state = dispatcher->getState();
+        
+          if (state == Dispatcher::DispatcherState::NO_CUP) {                             
+                ledMan->fadeTo(ledMan->getCurrentColor(), CRGB(0,0,100), 200);                   
+          } else if (state == Dispatcher::DispatcherState::READY) {                
+                ledMan->fadeTo(ledMan->getCurrentColor(), CRGB(0,100,0), 350);     
+                ble->notifyStatus("Ready!");
+          } else if (state == Dispatcher::DispatcherState::AWAITING_REMOVAL) {         
+            ledMan->trackTray(transport->getCurrentPosition(), CRGB(0,255,0), CRGB(10,10,10));        
+          } else if (dispatcher->isServing() == true) {
+            ledMan->trackTray(transport->getCurrentPosition(), CRGB(0,255,255), CRGB(0,0,20));          
+          }          
+          
+      if (state != lastState) { 
+        updateCupState();
+        lastState = state;
+      }
+      
     }
 
   handleSerialRequests();
-  handleBleRequests();
- 
-  uint32_t now = millis(); 
-    
-      
+  handleBleRequests();      
+}
+
+void updateCupState() {
+  Dispatcher::DispatcherState state = dispatcher->getState();
+  if (state == Dispatcher::DispatcherState::NO_CUP) {
+          Serial.println("[main][loop] No Cup Detected");
+          ble->notifyCupStatus(false);
+        } else {
+          Serial.println("[main][loop] Cup Detected");
+          ble->notifyCupStatus(true);
+        }  
 }
 
 
@@ -225,10 +243,14 @@ if (Serial.available() > 0) {  // Check if data is available to read
         transport->moveStepsRight(20);
         break;
       case 'B':
-      if (dispatcher->getState() == Dispatcher::DispatcherState::READY) {                
-        dispatcher->addStep(Dispenser::DispenseType::VALVE, 1, 1, 50.0);  //Pump 1 / Station 7
-        dispatcher->addStep(Dispenser::DispenseType::VALVE, 2, 2, 50.0);  //Pump 1 / Station 7
-        dispatcher->addStep(Dispenser::DispenseType::VALVE, 6, 6, 50.0);  //Pump 1 / Station 7        
+      if (dispatcher->getState() == Dispatcher::DispatcherState::READY) {                        
+        // dispatcher->addStep(Dispenser::DispenseType::PUMP, 1, 7, 50.0);  
+        // dispatcher->addStep(Dispenser::DispenseType::PUMP, 2, 8, 50.0);  
+        // dispatcher->addStep(Dispenser::DispenseType::PUMP, 3, 9, 50.0);  
+
+        dispatcher->addStep(Dispenser::DispenseType::PUMP, 1, 7, 50.0);  
+        dispatcher->addStep(Dispenser::DispenseType::PUMP, 2, 7, 50.0);  
+        dispatcher->addStep(Dispenser::DispenseType::PUMP, 3, 7, 50.0);  
         dispatcher->start();
       } else {
         Serial.println("[main][loop] Dispatcher not ready.");
@@ -340,22 +362,19 @@ void handleBleRequests() {
     if (parseBleRequestToDispatcher(rxdData_) == true) {
       if (dispatcher->getState() == Dispatcher::DispatcherState::NO_CUP) {
         ble->notifyStatus("No Cup! Please add a cup!");
+        ble->notifyCupStatus(false);
         return;
       }
-      ble->notifyStatus("Making your drink!");
+      ble->notifyStatus("Serving your drink!");
       dispatcher->start();
     } else if (rxdData_ == "C!") {
       Serial.println("[Main][handleBleRequests] Cancel Request Received");
       dispatcher->cancel();
     } else if (rxdData_ == "ehlo") {
       Serial.println("[Main][handleBleRequests] Ping Received");
-      CRGB currentColor = ledMan->getCurrentColor();
-      ledMan->setAllLeds(CRGB(50,50,50));
-      delay(300);
-      ledMan->setAllLeds(currentColor);      
-      
+      updateCupState();      
     }  else {
-      Serial.println("[Main][handleBleRequests] Invalid Request Received: " + String(rxdData_.c_str()));
+      Serial.println("[Main][handleBleRequests] Unknown Request Received: " + String(rxdData_.c_str()));
     }              
   }
   
@@ -403,12 +422,17 @@ bool parseBleRequestToDispatcher(const std::string& rxdData) {
         double targetWeight = atof(equalPos + 1);
 
 
+        int stationID = stepID;
+        int valveID = stepID;
         Dispenser::DispenseType stationType = Dispenser::DispenseType::VALVE;
-        if (stepID > 6) {
+        if (stationID > 6) {
             stationType = Dispenser::DispenseType::PUMP;
+            stationID = 7;            
         }
 
-        dispatcher->addStep(stationType, stepID, stepID, targetWeight);  
+        // dispatcher->addStep(Dispenser::DispenseType::PUMP, 1, 7, 50.0);  //Pump 1 / Station 7
+
+        dispatcher->addStep(stationType, stationID, valveID, targetWeight);
         Serial.println("[main][parseBTRequestToDispatcher] Step Added: " + String(stepID) + " = " + String(targetWeight)); 
         step = strtok(NULL, ",");
     }
