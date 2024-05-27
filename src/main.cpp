@@ -248,9 +248,11 @@ if (Serial.available() > 0) {  // Check if data is available to read
         // dispatcher->addStep(Dispenser::DispenseType::PUMP, 2, 8, 50.0);  
         // dispatcher->addStep(Dispenser::DispenseType::PUMP, 3, 9, 50.0);  
 
-        dispatcher->addStep(Dispenser::DispenseType::PUMP, 1, 7, 50.0);  
-        dispatcher->addStep(Dispenser::DispenseType::PUMP, 2, 7, 50.0);  
-        dispatcher->addStep(Dispenser::DispenseType::PUMP, 3, 7, 50.0);  
+        dispatcher->addStep(Dispenser::DispenseType::VALVE, 1, 1, 50.0);  //Station 1 // Valve 1 
+        dispatcher->addStep(Dispenser::DispenseType::PUMP, 7, 1, 50.0);  //Station 7 // Pump 1
+        dispatcher->addStep(Dispenser::DispenseType::PUMP, 7, 2, 50.0);  //Station 7 // Pump 2
+        dispatcher->addStep(Dispenser::DispenseType::PUMP, 7, 3, 50.0);  //Station 7 // Pump 3
+        dispatcher->addStep(Dispenser::DispenseType::VALVE, 2, 2, 50.0);  //Station 2 // Valve 2 
         dispatcher->start();
       } else {
         Serial.println("[main][loop] Dispatcher not ready.");
@@ -418,22 +420,23 @@ bool parseBleRequestToDispatcher(const std::string& rxdData) {
 
         // Extract StepID (index) and value
         *equalPos = '\0';
-        int stepID = atoi(step);
+        int addressID = atoi(step);
         double targetWeight = atof(equalPos + 1);
 
+        uint8_t stationID = (uint8_t)addressID;
+        uint8_t pourDeviceID = stationID;
 
-        int stationID = stepID;
-        int valveID = stepID;
+        
         Dispenser::DispenseType stationType = Dispenser::DispenseType::VALVE;
         if (stationID > 6) {
             stationType = Dispenser::DispenseType::PUMP;
-            stationID = 7;            
+            stationID = 7;
+            pourDeviceID = addressID - 6;
         }
 
-        // dispatcher->addStep(Dispenser::DispenseType::PUMP, 1, 7, 50.0);  //Pump 1 / Station 7
+        dispatcher->addStep(stationType, stationID, pourDeviceID, targetWeight);
 
-        dispatcher->addStep(stationType, stationID, valveID, targetWeight);
-        Serial.println("[main][parseBTRequestToDispatcher] Step Added: " + String(stepID) + " = " + String(targetWeight)); 
+        Serial.println("[main][parseBTRequestToDispatcher] Step Added: " + String(addressID) + " = " + String(targetWeight)); 
         step = strtok(NULL, ",");
     }
 

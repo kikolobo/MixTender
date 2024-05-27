@@ -44,7 +44,12 @@ void Dispatcher::movingPhase_() {
         Serial.println("[Dispatcher][movingPhase_] Transport at target.");
         state_ = DispatcherState::SERVING;
         steps_[currentStep_].beginDispensingTimeStampMS = millis();
-        dispenser_->beginDispensing(steps_[currentStep_].index, steps_[currentStep_].targetWeight, steps_[currentStep_].type);
+
+        if (steps_[currentStep_].type == Dispenser::DispenseType::PUMP) {
+            dispenser_->beginDispensingPump(steps_[currentStep_].pourDeviceIndex, steps_[currentStep_].targetWeight);
+        } else {
+            dispenser_->beginDispensingValve(steps_[currentStep_].pourDeviceIndex, steps_[currentStep_].targetWeight);
+        }
     }    
 }
 
@@ -122,7 +127,7 @@ void Dispatcher::reset_() {
 
 void Dispatcher::performNextStep_() {
         Serial.println("[Dispatcher][performNextStep_] Performing next step: " + String(currentStep_) + " of " + String(steps_.size()-1));
-        transport_->goToStation(steps_[currentStep_].index);
+        transport_->goToStation(steps_[currentStep_].stationIndex);
         steps_[currentStep_].beginMovementTimeStampMS = millis();        
         state_ = DispatcherState::MOVING;
         if (willBeginDispensingCallback_) {
@@ -134,13 +139,14 @@ void Dispatcher::clearSteps() {
     steps_.clear();
 }
 
-void Dispatcher::addStep(Dispenser::DispenseType type,  uint8_t index, uint8_t stationIndex, float targetWeight) {
+void Dispatcher::addStep(Dispenser::DispenseType type,  uint8_t stationIndex, uint8_t pourDeviceIndex, float targetWeight) {
     Steps step;
-    step.index = index;
-    step.stationIndex = stationIndex;
+    step.stationIndex = stationIndex;    
     step.type = type;
     step.targetWeight = targetWeight;
-    step.stepCompleted = false;
+    step.stepCompleted = false;    
+    step.pourDeviceIndex = pourDeviceIndex-1; //One based index to standardize with StationIndex (0==home)
+    
     steps_.push_back(step);
 }
 

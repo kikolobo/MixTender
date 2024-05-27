@@ -33,9 +33,9 @@ public:
 
 
     struct Steps
-    {
-        uint8_t index;
+    {        
         uint8_t stationIndex;
+        uint8_t pourDeviceIndex;        
         float targetWeight;
         uint32_t beginMovementTimeStampMS;
         uint32_t beginDispensingTimeStampMS;
@@ -43,7 +43,7 @@ public:
         bool stepCompleted = false;
         Dispenser::DispenseType type;
     };
-    
+
 
 using WillBeginDispensing = std::function<void(const uint8_t&)>;
 using DidFinishDispensing =  std::function<void(const uint8_t&)>;
@@ -54,7 +54,7 @@ using IsReady =  std::function<void()>;
 Dispatcher(std::shared_ptr<Dispenser> dispenser, std::shared_ptr<Transport> transport);
 void heartbeat();
 void clearSteps();
-void addStep(Dispenser::DispenseType type, uint8_t index, uint8_t stationIndex, float targetWeight);
+void addStep(Dispenser::DispenseType type,  uint8_t stationIndex, uint8_t pourDeviceIndex, float targetWeight);
 bool start();
 void cancel();
 bool isServing();

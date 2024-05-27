@@ -30,7 +30,10 @@ public:
     u_int8_t registerValve(std::shared_ptr<Valve> valve);
     u_int8_t registerPump(std::shared_ptr<Pump> pump);
     
-    void beginDispensing(uint8_t valveOrPumpIndex, float targetWeight, DispenseType type);    
+    // void beginDispensing(uint8_t valveOrPumpIndex, float targetWeight, DispenseType type);    
+    
+    void beginDispensingPump(uint8_t pourDeviceIndex, float targetWeight);    
+    void beginDispensingValve(uint8_t pourDeviceIndex, float targetWeight);    
 
     void registerCompletionCallback(DispenseCompleteCallback callback);
     void abortDispensing();
@@ -55,8 +58,10 @@ private:
     
     float targetWeight_;
     float latestWeight_;
-    uint8_t valveIndex_;
+    uint8_t valveIndex_;    
     uint8_t pumpIndex_;
+    uint8_t pourDeviceIndex_;
+
     float emptyWeight_;    
     float filteredValue_;
     DispenseType dispenseType_;
