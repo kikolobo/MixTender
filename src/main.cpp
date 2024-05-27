@@ -428,7 +428,7 @@ bool parseBleRequestToDispatcher(const std::string& rxdData) {
 
         
         Dispenser::DispenseType stationType = Dispenser::DispenseType::VALVE;
-        if (stationID > 6) {
+        if (stationID >= 7) {
             stationType = Dispenser::DispenseType::PUMP;
             stationID = 7;
             pourDeviceID = addressID - 6;
