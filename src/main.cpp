@@ -318,6 +318,9 @@ if (Serial.available() > 0) {  // Check if data is available to read
       case 'A':
         Serial.println("[main][loop] Absolute Weight: " + String(dispenser->getAbsoluteWeight()));
         break;
+      case '#':
+        dispenser->beginDispensingPump(1, 50.0);
+        break;
       
       default:        
         break;

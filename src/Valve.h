@@ -12,7 +12,7 @@ public:
         OPEN,
     };
 
-    Valve(uint8_t pin_servo, uint32_t closedPosition = 54, uint32_t openPosition = 155, uint32_t frequency = 300); //140
+    Valve(uint8_t pin_servo, uint32_t closedPosition = 50, uint32_t openPosition = 147, uint32_t frequency = 300); //140
     Position getPosition();    
     void setPosition(Position position);
     void writeValue(uint32_t value);
