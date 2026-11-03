@@ -3,6 +3,9 @@
 
 // Valve trims are stored in NVS (flash) under this namespace, keys "v<idx>o" / "v<idx>c".
 static const char* TRIM_NVS_NAMESPACE = "valvetrim";
+// Empty-tray weight (float, grams) is stored under this namespace / key.
+static const char* SCALE_NVS_NAMESPACE = "scale";
+static const char* EMPTY_WEIGHT_KEY = "empty";
 
 
 
@@ -11,7 +14,8 @@ Dispenser::Dispenser(uint8_t dat_pin, uint8_t sck_pin, float kFactor,  float emp
     scale_->begin(dat_pin, sck_pin);
     scale_->set_scale(kFactor);
     valves_.clear();
-    emptyWeight_ = emptyWeight;      
+    emptyWeight_ = emptyWeight;
+    defaultEmptyWeight_ = emptyWeight;
     valveIndex_ = 0;
     pumpIndex_ = 0;
     pourDeviceIndex_ = 0;
@@ -426,12 +430,86 @@ float Dispenser::getLatestWeight() {
     return latestWeight_ ;
 };
 
-float Dispenser::getAbsoluteWeight() {
+float Dispenser::getGrossWeight() {
+    // latestWeight_ is relative to the last tare; adding the tare offset back gives
+    // a reading that doesn't change when the scale is tared.
     float offset = ((float)scale_->get_offset() / (float)scale_->get_scale());
-    float absWeight = (latestWeight_ + offset) - emptyWeight_;
+    return latestWeight_ + offset;
+}
 
-    return absWeight; //fabs(offset);
+float Dispenser::getAbsoluteWeight() {
+    return getGrossWeight() - emptyWeight_;
 };
+
+float Dispenser::getEmptyWeight() {
+    return emptyWeight_;
+}
+
+float Dispenser::getDefaultEmptyWeight() {
+    return defaultEmptyWeight_;
+}
+
+bool Dispenser::isEmptyWeightSaved() {
+    Preferences prefs;
+    bool saved = false;
+    if (prefs.begin(SCALE_NVS_NAMESPACE, true)) {
+        saved = prefs.isKey(EMPTY_WEIGHT_KEY);
+        prefs.end();
+    }
+    return saved;
+}
+
+void Dispenser::loadEmptyWeight() {
+    Preferences prefs;
+    if (prefs.begin(SCALE_NVS_NAMESPACE, true)) {
+        if (prefs.isKey(EMPTY_WEIGHT_KEY)) {
+            float saved = prefs.getFloat(EMPTY_WEIGHT_KEY, defaultEmptyWeight_);
+            if (isfinite(saved) && fabs(saved) <= MAX_EMPTY_WEIGHT_GRAMS) {
+                emptyWeight_ = saved;
+            }
+        }
+        prefs.end();
+    }
+    Serial.println("[Scale] Empty tray weight: " + String(emptyWeight_, 2) + "g ("
+                   + (emptyWeight_ == defaultEmptyWeight_ && !isEmptyWeightSaved() ? "default" : "saved") + ")");
+}
+
+bool Dispenser::setEmptyWeight(float grams) {
+    if (!isfinite(grams) || fabs(grams) > MAX_EMPTY_WEIGHT_GRAMS) {
+        return false;
+    }
+    Preferences prefs;
+    if (!prefs.begin(SCALE_NVS_NAMESPACE, false)) {
+        Serial.println("[Scale] ERROR: could not open flash to save the empty tray weight.");
+        return false;
+    }
+    bool ok = prefs.putFloat(EMPTY_WEIGHT_KEY, grams) == sizeof(float);
+    prefs.end();
+    if (!ok) {
+        Serial.println("[Scale] ERROR: saving the empty tray weight failed.");
+        return false;
+    }
+    emptyWeight_ = grams;
+    Serial.println("[Scale] Empty tray weight set to " + String(grams, 2) + "g (saved).");
+    return true;
+}
+
+bool Dispenser::resetEmptyWeight() {
+    Preferences prefs;
+    if (!prefs.begin(SCALE_NVS_NAMESPACE, false)) {
+        Serial.println("[Scale] ERROR: could not open flash to reset the empty tray weight.");
+        return false;
+    }
+    bool ok = !prefs.isKey(EMPTY_WEIGHT_KEY) || prefs.remove(EMPTY_WEIGHT_KEY);
+    prefs.end();
+    if (!ok) {
+        Serial.println("[Scale] ERROR: erasing the saved empty tray weight failed.");
+        return false;
+    }
+    emptyWeight_ = defaultEmptyWeight_;
+    Serial.println("[Scale] Empty tray weight reset to default " + String(emptyWeight_, 2) + "g.");
+    return true;
+}
 
 void Dispenser::resetDispensing_(bool skipCallback) {    
 

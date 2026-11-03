@@ -21,12 +21,12 @@ void Dispatcher::heartbeat() {
     switch (state_)
     {
     case DispatcherState::NO_CUP:
-        if (dispenser_->getAbsoluteWeight() > 10.0) {
-            state_ = DispatcherState::READY;        
+        if (dispenser_->getAbsoluteWeight() > minCupGrams_) {
+            state_ = DispatcherState::READY;
         }
         break;
     case DispatcherState::READY:
-       if (dispenser_->getAbsoluteWeight() <= 3.0) {
+       if (dispenser_->getAbsoluteWeight() <= max(CUP_REMOVED_GRAMS, minCupGrams_ - CUP_DETECT_HYSTERESIS_GRAMS)) {
             state_ = DispatcherState::NO_CUP;
         }
         break;
@@ -224,6 +224,14 @@ void Dispatcher::performNextStep_() {
         transport_->goToStation(steps_[currentStep_].stationIndex);
         steps_[currentStep_].beginMovementTimeStampMS = millis();
         state_ = DispatcherState::MOVING;
+}
+
+void Dispatcher::setMinCupGrams(float grams) {
+    minCupGrams_ = grams;
+}
+
+float Dispatcher::getMinCupGrams() {
+    return minCupGrams_;
 }
 
 void Dispatcher::clearSteps() {

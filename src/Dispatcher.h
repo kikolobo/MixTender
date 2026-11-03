@@ -31,7 +31,9 @@ public:
 
     static const uint32_t WEIGHT_REPORT_INTERVAL_MS = 100; // W<n> updates at most ~10 Hz
 
-    static constexpr float CUP_REMOVED_GRAMS = 3.0;      // Same threshold as cup detection
+    static constexpr float CUP_REMOVED_GRAMS = 3.0;      // Tray clear: cup lifted mid-job
+    static constexpr float DEFAULT_MIN_CUP_GRAMS = 10.0; // Cup detected above this (settable)
+    static constexpr float CUP_DETECT_HYSTERESIS_GRAMS = 10.0;
     static const uint32_t CUP_REMOVED_DEBOUNCE_MS = 300;
 
     struct StepStatus
@@ -85,9 +87,14 @@ void setIsReady(IsReady callback);
 
 DispatcherState getState();
 StepStatus getStepStatus();
+// Lightest empty cup: a cup is detected above this weight (over the empty tray) and
+// lost at max(CUP_REMOVED_GRAMS, minCup - CUP_DETECT_HYSTERESIS_GRAMS).
+void setMinCupGrams(float grams);
+float getMinCupGrams();
     
         
-private:    
+private:
+    float minCupGrams_ = DEFAULT_MIN_CUP_GRAMS;    
     void movingPhase_();
     void servingPhase_();
     void awaitingEndDelayPhase_();

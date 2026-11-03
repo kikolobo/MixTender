@@ -64,7 +64,17 @@ public:
     DispenserState getState();
     bool isPouring(); // Output open, or closing and settling: weight readings belong to this step.
     float getLatestWeight();
-    float getAbsoluteWeight();
+    float getAbsoluteWeight();   // Weight above the empty tray (gross - empty-tray weight)
+    float getGrossWeight();      // Untared reading: scale units since power-up zero, tray included
+    // Empty-tray weight: subtracted from the gross reading to get the absolute weight
+    // (cup detection, "cup is not empty", cup-removed abort). Saved in flash.
+    float getEmptyWeight();
+    float getDefaultEmptyWeight();
+    bool isEmptyWeightSaved();
+    void loadEmptyWeight();              // Apply the value saved in flash, if any (call once in setup).
+    bool setEmptyWeight(float grams);    // Set and save. False if out of range or the save failed.
+    bool resetEmptyWeight();             // Back to the default and erase the saved value.
+    static constexpr float MAX_EMPTY_WEIGHT_GRAMS = 20000.0; // Accepted range: +/- this
     void setAllValves(Valve::Position position);    
     void trimValve(int value);
     void resetTrimPositions();
@@ -117,7 +127,8 @@ private:
     uint8_t pumpIndex_;
     uint8_t pourDeviceIndex_;
 
-    float emptyWeight_;    
+    float emptyWeight_;
+    float defaultEmptyWeight_;
     float filteredValue_;
     DispenseType dispenseType_;
     uint32_t awaitingClosureTimeStampMS_;

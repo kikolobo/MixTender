@@ -5,6 +5,7 @@
 #include <deque>
 #include <mutex>
 #include <Arduino.h>
+#include <Preferences.h>
 
 #include "SPI.h"
 #include <TMC5160.h>
@@ -37,14 +38,37 @@
 #define LC_SCK 12 
 #define SERVO4_PIN LED_BUILTIN  //13
 const float calibration_factor = 439;
+const float DEFAULT_EMPTY_TRAY_GRAMS = 121.38; // Used until an empty-tray weight is saved (K / Z)
 
 // Job limits enforced on every BLE "D:" request.
 const uint8_t NUM_VALVE_STATIONS = 6;   // ids 1..6 -> valves 1..6 at stations 1..6
 const uint8_t NUM_PUMPS = 3;            // ids 7..9 -> pumps 1..3, all at station 7
 const uint8_t PUMP_STATION = 7;
 const float MAX_JOB_GRAMS = 450.0;      // Glass capacity. Reject jobs above this.
-const float MAX_START_GRAMS = 400.0;    // Heaviest *empty* cup accepted. Above this the cup
-                                        // probably still holds a drink: refuse to pour.
+const float DEFAULT_MAX_CUP_GRAMS = 450.0; // Heaviest *empty* cup accepted (default). Above this the
+                                          // cup probably still holds a drink: refuse to pour.
+// Cup weight window, both over the empty tray and saved in flash:
+//   below min        -> no cup ("Please add a cup")
+//   min .. max       -> empty cup, ready
+//   above max        -> "Cup is not empty"
+// Settable range for both: CUP_LIMIT_LOW..CUP_LIMIT_HIGH, and min must stay below max.
+const float CUP_LIMIT_LOW = 5.0;
+const float CUP_LIMIT_HIGH = 2000.0;
+const float MIN_CUP_GAP_GRAMS = 20.0;      // min must be at least this much below max
+float maxCupGrams = DEFAULT_MAX_CUP_GRAMS; // In use; a saved value (KM= / M) overrides the default
+const float DEFAULT_MIN_CUP_GRAMS = Dispatcher::DEFAULT_MIN_CUP_GRAMS; // KN= / N
+void loadCupLimits();               // Apply saved min/max (call once the Dispatcher exists).
+// Set and save. False if out of range, too close to the other limit, or the save failed.
+bool setMinCupGrams(float grams);
+bool setMaxCupGrams(float grams);
+// Back to the default, saved value erased. False if the default would cross the other limit.
+bool resetMinCupGrams();
+bool resetMaxCupGrams();
+bool isCupSettingSaved(const char* key);
+bool isSaveableCupLimit(bool isMin, float grams); // In range and not crossing the other limit
+static const char* CUP_NVS_NAMESPACE = "scale";
+static const char* MIN_CUP_KEY = "mincup";
+static const char* MAX_CUP_KEY = "maxcup";
 const size_t MAX_PENDING_BLE_REQUESTS = 8;
 
 // HX711 scale;
@@ -95,7 +119,7 @@ const char* idleStatusText();     // $0 text for idle/busy states, nullptr when 
 void updateRobotStatus();
 int8_t lastOkToServe = -1;        // -1 = not sent yet
 std::string lastIdleText;
-bool cupNotEmpty = false;         // Cup on the scale is heavier than MAX_START_GRAMS (with hysteresis)
+bool cupNotEmpty = false;         // Cup on the scale is heavier than maxCupGrams (with hysteresis)
 std::atomic<bool> bleDisconnectedFlag(false);
 
 // Calibration tray session (TM over BLE, G over serial). The tray is moved under a
@@ -109,6 +133,11 @@ const char* checkValveOpenAllowed(uint8_t valveId); // nullptr if allowed, else 
 void endCalibrationSession();
 void checkCalibrationTrayArrival();
 void sendTrimReply(const std::string& message);
+
+// Empty-tray weight (K over BLE, K/Z over serial).
+void handleScaleRequest(const std::string& request);
+const char* checkScaleChangeAllowed(bool needsReading); // nullptr if allowed, else KE code
+std::string scaleStatusReply();
 
 //Callbacks from dispatcher (prototypes)
 void willBeginDispensing(uint8_t step);
@@ -155,8 +184,10 @@ void setup() {
   SPI.begin(SCK_PIN, POCI_MISO_PIN, PICO_MOSI_PIN, CS_PIN);
 
   transport = std::make_shared<Transport>(HOME_SW_PIN, EN_PIN, CS_PIN);
-  dispenser = std::make_shared<Dispenser>(LC_DAT, LC_SCK, calibration_factor , 121.38);
+  dispenser = std::make_shared<Dispenser>(LC_DAT, LC_SCK, calibration_factor, DEFAULT_EMPTY_TRAY_GRAMS);
+  dispenser->loadEmptyWeight(); // Saved empty-tray weight (K/Z) overrides the default.
   dispatcher = std::make_unique<Dispatcher>(dispenser, transport);
+  loadCupLimits();              // Saved min/max cup weights (KN=/KM=, N/M) override the defaults.
 
   Serial.println("[INITIALIZING TRASNPORT]");
   transport->defineStation(12);  
@@ -263,8 +294,13 @@ void loop() {
         
           if (state == Dispatcher::DispatcherState::NO_CUP) {                             
                 ledMan->fadeTo(ledMan->getCurrentColor(), CRGB(0,0,100), 200);                   
-          } else if (state == Dispatcher::DispatcherState::READY) {                
-                ledMan->fadeTo(ledMan->getCurrentColor(), CRGB(0,100,0), 350);     
+          } else if (state == Dispatcher::DispatcherState::READY) {
+                if (okToServe()) {
+                  ledMan->fadeTo(ledMan->getCurrentColor(), CRGB(0,100,0), 350);   // Green: clear to serve
+                } else {
+                  // Yellow: cup on, but not clear to go (cup not empty, calibrating, parking...).
+                  ledMan->fadeTo(ledMan->getCurrentColor(), CRGB(100,70,0), 350);
+                }
           } else if (state == Dispatcher::DispatcherState::AWAITING_REMOVAL) {         
             ledMan->trackTray(transport->getCurrentPosition(), CRGB(0,255,0), CRGB(10,10,10));        
           } else if (dispatcher->isServing() == true) {
@@ -312,9 +348,9 @@ void updateRobotStatus() {
   Dispatcher::DispatcherState state = dispatcher->getState();
   if (state == Dispatcher::DispatcherState::READY) {
     float w = dispenser->getAbsoluteWeight();
-    if (w > MAX_START_GRAMS) {
+    if (w > maxCupGrams) {
       cupNotEmpty = true;
-    } else if (w < MAX_START_GRAMS - 10.0) {
+    } else if (w < maxCupGrams - 10.0) {
       cupNotEmpty = false; // 10 g hysteresis so a cup near the limit doesn't flicker
     }
   } else if (state == Dispatcher::DispatcherState::NO_CUP) {
@@ -341,6 +377,79 @@ void updateRobotStatus() {
 void handleSerialRequests() {
 if (Serial.available() > 0) {  // Check if data is available to read
     auto receivedChar = Serial.read(); // Read the incoming byte
+
+    // "K" (empty-tray weight), "N" (min cup weight) or "M" (max cup weight), then a number and Enter.
+    // "R" + Enter = default, Enter alone = cancel. Captured before anything else so
+    // the digits don't open valves.
+    static char pendingEntry = 0; // 'K', 'N', 'M', or 0
+    static String entryLine;
+    if (pendingEntry != 0) {
+      if (receivedChar != '\r' && receivedChar != '\n') {
+        if (entryLine.length() < 16) {
+          entryLine += (char)receivedChar;
+        }
+        return;
+      }
+      char entry = pendingEntry;
+      pendingEntry = 0;
+      String line = entryLine;
+      entryLine = "";
+      line.trim();
+      if (line.length() == 0) {
+        Serial.println("[Scale] Cancelled.");
+        return;
+      }
+      const char* error = checkScaleChangeAllowed(false);
+      if (error != nullptr) {
+        Serial.println("[Scale] Can't change it now (" + String(error) + ").");
+        return;
+      }
+      bool reset = (line == "R" || line == "r");
+      char* end;
+      float grams = reset ? 0.0f : strtof(line.c_str(), &end);
+      bool parsed = reset || (end != line.c_str() && *end == '\0');
+      bool ok;
+      if (entry == 'K') {
+        ok = parsed && (reset ? dispenser->resetEmptyWeight() : dispenser->setEmptyWeight(grams));
+      } else if (entry == 'N') {
+        ok = parsed && (reset ? resetMinCupGrams() : setMinCupGrams(grams));
+      } else {
+        ok = parsed && (reset ? resetMaxCupGrams() : setMaxCupGrams(grams));
+      }
+      if (!ok) {
+        Serial.println("[Scale] Not set: '" + line + "' (empty tray: +/-" + String(Dispenser::MAX_EMPTY_WEIGHT_GRAMS, 0)
+                       + "g; cup min/max: " + String(CUP_LIMIT_LOW, 0) + "-" + String(CUP_LIMIT_HIGH, 0)
+                       + "g with min at least " + String(MIN_CUP_GAP_GRAMS, 0) + "g below max).");
+        return;
+      }
+      Serial.println("[Scale] Absolute weight now " + String(dispenser->getAbsoluteWeight(), 1)
+                     + "g, cup window " + String(dispatcher->getMinCupGrams(), 1) + "-" + String(maxCupGrams, 1) + "g.");
+      return;
+    }
+    if (receivedChar == 'K') {
+      pendingEntry = 'K';
+      entryLine = "";
+      Serial.println("[Scale] Empty tray weight is " + String(dispenser->getEmptyWeight(), 2)
+                     + "g. Type new grams + Enter (R + Enter = default " + String(dispenser->getDefaultEmptyWeight(), 2)
+                     + "g, Enter alone = cancel).");
+      return;
+    }
+    if (receivedChar == 'N') {
+      pendingEntry = 'N';
+      entryLine = "";
+      Serial.println("[Scale] Min cup weight (lightest empty cup) is " + String(dispatcher->getMinCupGrams(), 1)
+                     + "g. Type new grams + Enter (R + Enter = default " + String(DEFAULT_MIN_CUP_GRAMS, 1)
+                     + "g, Enter alone = cancel).");
+      return;
+    }
+    if (receivedChar == 'M') {
+      pendingEntry = 'M';
+      entryLine = "";
+      Serial.println("[Scale] Max empty-cup weight is " + String(maxCupGrams, 1)
+                     + "g. Type new grams + Enter (R + Enter = default " + String(DEFAULT_MAX_CUP_GRAMS, 1)
+                     + "g, Enter alone = cancel).");
+      return;
+    }
 
     // "G" then a digit 0-6: move the tray under that valve for calibration (0 = park).
     static bool awaitingStationDigit = false;
@@ -517,6 +626,11 @@ if (Serial.available() > 0) {  // Check if data is available to read
         Serial.println(" Other:");
         Serial.println("  ? position   < > jog tray   P pump station   B test job   C cancel");
         Serial.println("  T tare   S weight   A absolute weight   , . scale factor   H re-home");
+        Serial.println(" Empty tray weight (saved; used for cup detection):");
+        Serial.println("  Z        zero: take the current reading as the empty tray (remove the cup first)");
+        Serial.println("  K        type grams + Enter to set it, R + Enter = default");
+        Serial.println("  N        min cup weight (lightest empty cup): grams + Enter, R + Enter = default");
+        Serial.println("  M        max empty-cup weight: type grams + Enter, R + Enter = default");
         break;
       case 'P':
         transport->goToStation(7);
@@ -525,8 +639,20 @@ if (Serial.available() > 0) {  // Check if data is available to read
         Serial.println("[main][loop] Weight: " + String(dispenser->getLatestWeight()) + "g (scale " + String(dispenser->getSampleRate(), 1) + " SPS)");
         break;
       case 'A':
-        Serial.println("[main][loop] Absolute Weight: " + String(dispenser->getAbsoluteWeight()));
+        Serial.println("[main][loop] Absolute Weight: " + String(dispenser->getAbsoluteWeight())
+                       + "g (gross " + String(dispenser->getGrossWeight()) + "g - empty tray "
+                       + String(dispenser->getEmptyWeight()) + "g), cup window " + String(dispatcher->getMinCupGrams())
+                       + "-" + String(maxCupGrams) + "g");
         break;
+      case 'Z': {
+        const char* error = checkScaleChangeAllowed(true);
+        if (error != nullptr) {
+          Serial.println("[Scale] Can't zero now (" + String(error) + "). Tray must be parked, empty, and no job running.");
+        } else if (dispenser->setEmptyWeight(dispenser->getGrossWeight())) {
+          Serial.println("[Scale] Zeroed: the current reading is now the empty tray.");
+        }
+        break;
+      }
       case '#':
         dispenser->beginDispensingPump(1, 50.0);
         break;
@@ -631,7 +757,7 @@ void handleBleRequests() {
         return;
       }
       float cupWeight = dispenser->getAbsoluteWeight();
-      if (cupWeight > MAX_START_GRAMS) {
+      if (cupWeight > maxCupGrams) {
         Serial.println("[Main][handleBleRequests] Cup too heavy to be empty: " + String(cupWeight) + "g");
         rejectJob(stepCount, "Cup is not empty");
         return;
@@ -664,6 +790,8 @@ void handleBleRequests() {
       ble->notifyStatus(statusTextForState());
     } else if (!rxdData_.empty() && rxdData_[0] == 'T') {
       handleTrimRequest(rxdData_);
+    } else if (!rxdData_.empty() && rxdData_[0] == 'K') {
+      handleScaleRequest(rxdData_);
     }  else {
       Serial.println("[Main][handleBleRequests] Unknown Request Received: " + String(rxdData_.c_str()));
     }
@@ -778,6 +906,195 @@ void handleTrimRequest(const std::string& request) {
   }
 
   sendTrimReply(ok ? dispenser->valveTrimStatus(valveId) : "TE=bad");
+}
+
+// Empty-tray weight over BLE.
+//   K?          status                  -> K=<absolute>,<emptyTray>,<default>,<saved>
+//   KZ          zero: current reading becomes the empty tray, saved
+//   KT=<grams>  set the empty-tray weight, saved
+//   KR          back to the default, saved value erased
+//   KM=<grams>  set the max empty-cup weight, saved
+//   KMR         max cup weight back to the default, saved value erased
+//   KN=<grams>  set the min cup weight (lightest empty cup), saved
+//   KNR         min cup weight back to the default, saved value erased
+// Reply: K=<absolute>,<emptyTray>,<defaultTray>,<traySaved>,<maxCup>,<defaultMaxCup>,<maxCupSaved>,
+//          <minCup>,<defaultMinCup>,<minCupSaved>
+// Errors: KE=busy|scale|range|bad|flash
+void handleScaleRequest(const std::string& request) {
+  if (request == "K?") {
+    sendTrimReply(scaleStatusReply());
+    return;
+  }
+
+  if (request == "KZ") {
+    const char* error = checkScaleChangeAllowed(true);
+    if (error != nullptr) { sendTrimReply(std::string("KE=") + error); return; }
+    if (!dispenser->setEmptyWeight(dispenser->getGrossWeight())) { sendTrimReply("KE=flash"); return; }
+  } else if (request == "KR") {
+    const char* error = checkScaleChangeAllowed(false);
+    if (error != nullptr) { sendTrimReply(std::string("KE=") + error); return; }
+    if (!dispenser->resetEmptyWeight()) { sendTrimReply("KE=flash"); return; }
+  } else if (request == "KMR" || request == "KNR") {
+    const char* error = checkScaleChangeAllowed(false);
+    if (error != nullptr) { sendTrimReply(std::string("KE=") + error); return; }
+    bool isMin = (request == "KNR");
+    if (!(isMin ? resetMinCupGrams() : resetMaxCupGrams())) {
+      // Fails only if the default would cross the other limit (or flash failed).
+      sendTrimReply(isSaveableCupLimit(isMin, isMin ? DEFAULT_MIN_CUP_GRAMS : DEFAULT_MAX_CUP_GRAMS) ? "KE=flash" : "KE=range");
+      return;
+    }
+  } else if (request.rfind("KM=", 0) == 0 || request.rfind("KN=", 0) == 0) {
+    bool isMin = (request[1] == 'N');
+    const char* start = request.c_str() + 3;
+    char* end;
+    float grams = strtof(start, &end);
+    if (end == start || *end != '\0') { sendTrimReply("KE=bad"); return; }
+    if (!isSaveableCupLimit(isMin, grams)) { sendTrimReply("KE=range"); return; }
+    const char* error = checkScaleChangeAllowed(false);
+    if (error != nullptr) { sendTrimReply(std::string("KE=") + error); return; }
+    if (!(isMin ? setMinCupGrams(grams) : setMaxCupGrams(grams))) { sendTrimReply("KE=flash"); return; }
+  } else if (request.rfind("KT=", 0) == 0) {
+    const char* start = request.c_str() + 3;
+    char* end;
+    float grams = strtof(start, &end);
+    if (end == start || *end != '\0') { sendTrimReply("KE=bad"); return; }
+    if (!isfinite(grams) || fabs(grams) > Dispenser::MAX_EMPTY_WEIGHT_GRAMS) { sendTrimReply("KE=range"); return; }
+    const char* error = checkScaleChangeAllowed(false);
+    if (error != nullptr) { sendTrimReply(std::string("KE=") + error); return; }
+    if (!dispenser->setEmptyWeight(grams)) { sendTrimReply("KE=flash"); return; }
+  } else {
+    sendTrimReply("KE=bad");
+    return;
+  }
+  sendTrimReply(scaleStatusReply());
+}
+
+std::string scaleStatusReply() {
+  char reply[128];
+  snprintf(reply, sizeof(reply), "K=%.1f,%.1f,%.1f,%d,%.1f,%.1f,%d,%.1f,%.1f,%d",
+           dispenser->getAbsoluteWeight(), dispenser->getEmptyWeight(),
+           dispenser->getDefaultEmptyWeight(), dispenser->isEmptyWeightSaved() ? 1 : 0,
+           maxCupGrams, DEFAULT_MAX_CUP_GRAMS, isCupSettingSaved(MAX_CUP_KEY) ? 1 : 0,
+           dispatcher->getMinCupGrams(), DEFAULT_MIN_CUP_GRAMS, isCupSettingSaved(MIN_CUP_KEY) ? 1 : 0);
+  return reply;
+}
+
+// Cup weight window, stored next to the empty-tray weight (NVS "scale").
+bool isSaveableCupLimit(bool isMin, float grams) {
+  if (!isfinite(grams) || grams < CUP_LIMIT_LOW || grams > CUP_LIMIT_HIGH) {
+    return false;
+  }
+  return isMin ? grams <= maxCupGrams - MIN_CUP_GAP_GRAMS
+               : grams >= dispatcher->getMinCupGrams() + MIN_CUP_GAP_GRAMS;
+}
+
+bool isCupSettingSaved(const char* key) {
+  Preferences prefs;
+  bool saved = false;
+  if (prefs.begin(CUP_NVS_NAMESPACE, true)) {
+    saved = prefs.isKey(key);
+    prefs.end();
+  }
+  return saved;
+}
+
+static bool saveCupSetting(const char* key, float grams) {
+  Preferences prefs;
+  if (!prefs.begin(CUP_NVS_NAMESPACE, false)) {
+    Serial.println("[Scale] ERROR: could not open flash to save " + String(key) + ".");
+    return false;
+  }
+  bool ok = prefs.putFloat(key, grams) == sizeof(float);
+  prefs.end();
+  if (!ok) {
+    Serial.println("[Scale] ERROR: saving " + String(key) + " failed.");
+  }
+  return ok;
+}
+
+static bool eraseCupSetting(const char* key) {
+  Preferences prefs;
+  if (!prefs.begin(CUP_NVS_NAMESPACE, false)) {
+    Serial.println("[Scale] ERROR: could not open flash to erase " + String(key) + ".");
+    return false;
+  }
+  bool ok = !prefs.isKey(key) || prefs.remove(key);
+  prefs.end();
+  if (!ok) {
+    Serial.println("[Scale] ERROR: erasing " + String(key) + " failed.");
+  }
+  return ok;
+}
+
+void loadCupLimits() {
+  float minCup = DEFAULT_MIN_CUP_GRAMS;
+  float maxCup = DEFAULT_MAX_CUP_GRAMS;
+  Preferences prefs;
+  if (prefs.begin(CUP_NVS_NAMESPACE, true)) {
+    if (prefs.isKey(MIN_CUP_KEY)) minCup = prefs.getFloat(MIN_CUP_KEY, minCup);
+    if (prefs.isKey(MAX_CUP_KEY)) maxCup = prefs.getFloat(MAX_CUP_KEY, maxCup);
+    prefs.end();
+  }
+  bool valid = isfinite(minCup) && isfinite(maxCup)
+            && minCup >= CUP_LIMIT_LOW && maxCup <= CUP_LIMIT_HIGH
+            && minCup <= maxCup - MIN_CUP_GAP_GRAMS;
+  if (!valid) {
+    Serial.println("[Scale] Saved cup limits invalid. Using defaults.");
+    minCup = DEFAULT_MIN_CUP_GRAMS;
+    maxCup = DEFAULT_MAX_CUP_GRAMS;
+  }
+  dispatcher->setMinCupGrams(minCup);
+  maxCupGrams = maxCup;
+  Serial.println("[Scale] Cup window: " + String(minCup, 1) + "g (min, no cup below) to "
+                 + String(maxCup, 1) + "g (max, not empty above)");
+}
+
+bool setMinCupGrams(float grams) {
+  if (!isSaveableCupLimit(true, grams) || !saveCupSetting(MIN_CUP_KEY, grams)) return false;
+  dispatcher->setMinCupGrams(grams);
+  Serial.println("[Scale] Min cup weight set to " + String(grams, 1) + "g (saved).");
+  return true;
+}
+
+bool setMaxCupGrams(float grams) {
+  if (!isSaveableCupLimit(false, grams) || !saveCupSetting(MAX_CUP_KEY, grams)) return false;
+  maxCupGrams = grams;
+  Serial.println("[Scale] Max empty-cup weight set to " + String(grams, 1) + "g (saved).");
+  return true;
+}
+
+bool resetMinCupGrams() {
+  if (!isSaveableCupLimit(true, DEFAULT_MIN_CUP_GRAMS) || !eraseCupSetting(MIN_CUP_KEY)) return false;
+  dispatcher->setMinCupGrams(DEFAULT_MIN_CUP_GRAMS);
+  Serial.println("[Scale] Min cup weight reset to default " + String(DEFAULT_MIN_CUP_GRAMS, 1) + "g.");
+  return true;
+}
+
+bool resetMaxCupGrams() {
+  if (!isSaveableCupLimit(false, DEFAULT_MAX_CUP_GRAMS) || !eraseCupSetting(MAX_CUP_KEY)) return false;
+  maxCupGrams = DEFAULT_MAX_CUP_GRAMS;
+  Serial.println("[Scale] Max empty-cup weight reset to default " + String(DEFAULT_MAX_CUP_GRAMS, 1) + "g.");
+  return true;
+}
+
+// Changing the empty-tray weight moves the cup thresholds, so never during a job or
+// while a finished drink waits. Zeroing also needs a settled, live reading.
+const char* checkScaleChangeAllowed(bool needsReading) {
+  Dispatcher::DispatcherState state = dispatcher->getState();
+  if (dispatcher->isServing()
+      || (state != Dispatcher::DispatcherState::NO_CUP && state != Dispatcher::DispatcherState::READY)) {
+    return "busy";
+  }
+  if (needsReading) {
+    if (!dispenser->isScaleResponding()) {
+      return "scale";
+    }
+    if (!transport->isParked() || calibrationTrayActive
+        || dispenser->getState() == Dispenser::DispenserState::TARING) {
+      return "busy"; // Tray moving or away (vibration, cup under a valve) or a tare in progress.
+    }
+  }
+  return nullptr;
 }
 
 const char* checkCalibrationTrayMove() {
