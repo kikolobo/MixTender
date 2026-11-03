@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Protocol version** | **3** |
+| **Protocol version** | **4** |
 | **Date** | 2026-11-03 |
 | **Firmware** | `kikolobo/MixTender`, branch `firmware-safety-and-calibration` |
 | **App** | `kikolobo/mixtender_app` (MixBot) |
@@ -183,8 +183,10 @@ job starts.
 
 ## A.7 Valve calibration `T`
 
-Calibrates the open and closed servo angles of valve stations **1–6**. Pumps have no
-calibration. Angles are degrees, **0–180**. Factory defaults: **open 147, closed 50**.
+Calibrates the open and closed servo angles of valve stations **1–6** only. Stations
+**7–9 are pumps** (on/off, no angles): every `T` command with id 7–9 is refused with
+`TE=pump`, and calibration never moves the tray to the pump station. A calibration UI
+should list only stations of kind `valve`. Angles are degrees, **0–180**. Factory defaults: **open 147, closed 50**.
 A calibration saved in flash survives reboot; until a valve is saved it uses the defaults.
 
 **Opening a valve requires the tray under it** (since v3). Valve `<id>` sits at rail
@@ -218,7 +220,8 @@ Errors:
 | `busy` | A job is running (everything except `T?` is refused). For `TM` also: not homed yet, or a finished drink is waiting to be removed |
 | `tray` | `TO` refused: the tray is not under that valve. Send `TM<id>` first |
 | `moving` | `TO` refused: the tray is still moving. Wait for `TM<id>=at` |
-| `valve` | Id out of range (1–6; 0–6 for `TM`) |
+| `pump` | Id 7–9: a pump station. Pumps are on/off and have no calibration |
+| `valve` | Any other id out of range (1–6; 0–6 for `TM`) |
 | `angle` | Angle outside 0–180 |
 | `bad` | Malformed command |
 | `flash` | Save failed |
@@ -285,7 +288,7 @@ Same safety as BLE: **opening needs the tray under the valve**.
 
 | Key | Action |
 |-----|--------|
-| `G` then `0`–`6` | Close all valves and move the tray under valve 1–6 (`G0` = park) |
+| `G` then `0`–`6` | Close all valves and move the tray under valve 1–6 (`G0` = park). `G7`–`G9` refused (pumps) |
 | `1`–`6` | Select valve 1–6 and move it OPEN (**pours**). Refused unless the tray is under it |
 | `q` `w` `e` `r` `t` `y` | Select valve 1–6 and move it CLOSED |
 | `+` / `-` | Move the selected valve's current position by ±1° (if it's open, the tray must be under it) |
@@ -307,6 +310,11 @@ holding the **trim** (offset from the default angle), not the absolute angle.
 ---
 
 # Changelog
+
+## v4 — 2026-11-03
+- BLE: `T` commands with a pump station id (7–9) now reply `TE=pump` instead of `TE=valve`.
+  Calibration is for valves 1–6 only (unchanged behavior, clearer error).
+- USB: `G7`–`G9` print a "pumps can't be calibrated" message.
 
 ## v3 — 2026-11-03
 BLE (backward compatible with v2 apps, except that `TO` now needs the tray under the valve):

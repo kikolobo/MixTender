@@ -276,6 +276,10 @@ if (Serial.available() > 0) {  // Check if data is available to read
     static bool awaitingStationDigit = false;
     if (awaitingStationDigit) {
       awaitingStationDigit = false;
+      if (receivedChar >= '7' && receivedChar <= '9') {
+        Serial.println("[Calibration] Stations 7-9 are pumps (on/off): only valves 1-6 can be calibrated.");
+        return;
+      }
       if (receivedChar < '0' || receivedChar > '6') {
         Serial.println("[Calibration] G needs a station 0-6. Cancelled.");
         return;
@@ -607,6 +611,10 @@ void handleTrimRequest(const std::string& request) {
   long valveId = strtol(request.c_str() + 2, &end, 10);
   if (end == request.c_str() + 2) {
     sendTrimReply("TE=bad");
+    return;
+  }
+  if (valveId > NUM_VALVE_STATIONS && valveId <= NUM_VALVE_STATIONS + NUM_PUMPS) {
+    sendTrimReply("TE=pump"); // Stations 7-9 are on/off pumps: nothing to calibrate.
     return;
   }
   long minId = (command == 'M') ? 0 : 1; // TM0 = park
