@@ -21,6 +21,16 @@ public:
         UNKNOWN,
     };
 
+    enum class AbortReason {
+        CUP_REMOVED,
+        NO_FLOW,
+        POUR_TIMEOUT,
+        SCALE,
+    };
+
+    static constexpr float CUP_REMOVED_GRAMS = 3.0;      // Same threshold as cup detection
+    static const uint32_t CUP_REMOVED_DEBOUNCE_MS = 300;
+
     struct StepStatus
     {
         uint8_t index;
@@ -48,6 +58,7 @@ public:
 using WillBeginDispensing = std::function<void(const uint8_t&)>;
 using DidFinishDispensing =  std::function<void(const uint8_t&)>;
 using DidFailDispensing =  std::function<void(const uint8_t&)>;
+using DidAbortJob =  std::function<void(AbortReason)>;
 using DidUpdateWeight =  std::function<void(const uint8_t&, float weight)>;
 using DidFinishJob =  std::function<void()>;
 using IsReady =  std::function<void()>;
@@ -63,6 +74,7 @@ bool isServing();
 void setWillBeginDispensingCallback(WillBeginDispensing callback);
 void setDidFinishDispensingCallback(DidFinishDispensing callback);
 void setDidFailDispensingCallback(DidFailDispensing callback);
+void setDidAbortJobCallback(DidAbortJob callback);
 void setDidUpdateWeight(DidUpdateWeight callback);
 void setDidFinishJob(DidFinishJob callback);
 void setIsReady(IsReady callback);
@@ -80,6 +92,8 @@ private:
     void jobCompletePhase_();
     void performNextStep_();
     void advanceStep_();
+    void abortJob_(AbortReason reason);
+    uint32_t cupMissingSinceMs_ = 0;
     void reset_();
 
     std::shared_ptr<Dispenser> dispenser_;
@@ -88,6 +102,7 @@ private:
     WillBeginDispensing willBeginDispensingCallback_;
     DidFinishDispensing didFinishDispensingCallback_;
     DidFailDispensing didFailDispensingCallback_;
+    DidAbortJob didAbortJobCallback_;
     DidUpdateWeight didUpdateWeightCallback_;
     DidFinishJob didFinishJobCallback_;
     IsReady isReadyCallback_;

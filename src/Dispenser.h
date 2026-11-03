@@ -15,9 +15,26 @@ public:
         DISPENSING,
         AWAITING_CLOSURE,
         AWAITING_STABILITY,        
+        TARING,      // Non-blocking tare: averaging TARE_SAMPLES readings
         STABLE,
         FINISHED,
+        FAILED,      // Pour stopped by a safety check; see getFailureReason()
     };
+
+    enum class FailureReason {
+        NONE,
+        SCALE,         // Scale stopped answering (tare or pour)
+        NO_FLOW,       // Weight not rising: empty bottle / blocked valve
+        POUR_TIMEOUT,  // Pour exceeded POUR_MAX_MS
+    };
+
+    // Safety limits (ms / g).
+    static const uint8_t  TARE_SAMPLES = 10;
+    static const uint32_t TARE_TIMEOUT_MS = 3000;     // 10 samples take ~1 s at 10 SPS
+    static const uint32_t SCALE_SILENT_MS = 1000;     // No reading for this long = scale fault
+    static const uint32_t NO_FLOW_TIMEOUT_MS = 5000;  // Must gain NO_FLOW_MIN_GRAMS within this
+    static constexpr float NO_FLOW_MIN_GRAMS = 1.0;
+    static const uint32_t POUR_MAX_MS = 90000;        // Hard cap per step
 
     enum class DispenseType {
         VALVE,
@@ -39,7 +56,9 @@ public:
     void registerCompletionCallback(DispenseCompleteCallback callback);
     void abortDispensing();
     void heartbeat();
-    void tare();
+    bool tare();                 // Non-blocking; false if a pour is in progress
+    bool isScaleResponding();    // A reading arrived within SCALE_SILENT_MS
+    FailureReason getFailureReason();
     DispenserState getState();
     bool isPouring(); // Output open, or closing and settling: weight readings belong to this step.
     float getLatestWeight();
@@ -65,6 +84,17 @@ public:
 private:
     void resetDispensing_(bool skipCallback = false);
     void finishDispensing_();
+    void startTare_(DispenserState afterTare);
+    void fail_(FailureReason reason);
+    FailureReason failureReason_ = FailureReason::NONE;
+    DispenserState afterTareState_ = DispenserState::FINISHED;
+    int64_t tareSum_ = 0;
+    uint8_t tareCount_ = 0;
+    uint32_t tareStartMs_ = 0;
+    uint32_t lastSampleMs_ = 0;
+    uint32_t pourStartMs_ = 0;
+    uint32_t lastProgressMs_ = 0;
+    float progressWeight_ = 0.0;
     void printValveTrim_(uint8_t index);
     bool isValveTrimSaved_(uint8_t index);
     bool isValidValveId_(uint8_t valveId);

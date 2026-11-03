@@ -2,7 +2,22 @@
 
 
 void Dispatcher::heartbeat() {
-    
+
+    // Cup lifted mid-job: stop pouring onto the tray.
+    if (state_ == DispatcherState::MOVING || state_ == DispatcherState::SERVING || state_ == DispatcherState::AWAITING_END_DELAY) {
+        if (dispenser_->getAbsoluteWeight() < CUP_REMOVED_GRAMS) {
+            if (cupMissingSinceMs_ == 0) {
+                cupMissingSinceMs_ = millis();
+            } else if (millis() - cupMissingSinceMs_ > CUP_REMOVED_DEBOUNCE_MS) {
+                Serial.println("[Dispatcher][heartbeat] Cup removed during job!");
+                abortJob_(AbortReason::CUP_REMOVED);
+                return;
+            }
+        } else {
+            cupMissingSinceMs_ = 0;
+        }
+    }
+
     switch (state_)
     {
     case DispatcherState::NO_CUP:
@@ -65,6 +80,18 @@ void Dispatcher::movingPhase_() {
 }
 
 void Dispatcher::servingPhase_() {
+    if (dispenser_->getState() == Dispenser::DispenserState::FAILED) {
+        AbortReason reason = AbortReason::SCALE;
+        switch (dispenser_->getFailureReason()) {
+            case Dispenser::FailureReason::NO_FLOW:      reason = AbortReason::NO_FLOW; break;
+            case Dispenser::FailureReason::POUR_TIMEOUT: reason = AbortReason::POUR_TIMEOUT; break;
+            default:                                     reason = AbortReason::SCALE; break;
+        }
+        Serial.println("[Dispatcher][servingPhase_] Dispenser failed on step " + String(currentStep_) + ". Aborting job.");
+        abortJob_(reason);
+        return;
+    }
+
     if (dispenser_->getState() == Dispenser::DispenserState::FINISHED) {
         Serial.println("[Dispatcher][servingPhase_] Dispensing Complete.");
         state_ = DispatcherState::AWAITING_END_DELAY;
@@ -139,6 +166,23 @@ bool Dispatcher::cancel() {
     return true;
 }
 
+// Stop everything, fail the current and all remaining steps (the app needs an
+// S=C/F for every step), park, and wait for the cup to be removed.
+void Dispatcher::abortJob_(AbortReason reason) {
+    dispenser_->abortDispensing();
+    for (uint8_t i = currentStep_; i < steps_.size(); i++) {
+        if (didFailDispensingCallback_) {
+            didFailDispensingCallback_(i);
+        }
+    }
+    transport_->goPark();
+    cupMissingSinceMs_ = 0;
+    state_ = DispatcherState::AWAITING_REMOVAL;
+    if (didAbortJobCallback_) {
+        didAbortJobCallback_(reason);
+    }
+}
+
 void Dispatcher::reset_() {
         Serial.println("[Dispatcher][reset_] Job complete: " + String(steps_.size()) + " steps executed in " + String(millis() - jobBeginTimeStampMS_) + "ms.");
         steps_.clear();
@@ -200,6 +244,7 @@ bool Dispatcher::start() {
         return false;
     }
 
+    cupMissingSinceMs_ = 0;
     // A valve may have been left open by calibration (serial or BLE).
     dispenser_->setAllValves(Valve::Position::CLOSED);
 
@@ -248,6 +293,10 @@ void Dispatcher::setWillBeginDispensingCallback(WillBeginDispensing callback) {
 
 void Dispatcher::setDidFinishDispensingCallback(DidFinishDispensing callback) {
     didFinishDispensingCallback_ = callback;
+}
+
+void Dispatcher::setDidAbortJobCallback(DidAbortJob callback) {
+    didAbortJobCallback_ = callback;
 }
 
 void Dispatcher::setDidFailDispensingCallback(DidFailDispensing callback) {

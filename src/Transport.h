@@ -19,7 +19,10 @@ public:
         HOMING,                
         MOVING_TO_TARGET_POS,
         AT_TARGET,
+        FAULT,              // Homing failed: position unknown, station moves refused
     };
+
+    static const uint32_t HOMING_TIMEOUT_MS = 120000; // Backstop for the whole homing sequence
 
       enum class HomingStage {
         NONE,
@@ -49,6 +52,7 @@ public:
     bool isAtTarget();
     int8_t getCurrentStationIndex(); // Last station requested (0 = park), -1 before the first move.
     bool isReady();
+    bool isHomed();
     MachineState getState();
 
 private:   
@@ -71,6 +75,9 @@ private:
 
 
     void setState_(MachineState state);
+    void homingFailed_(const String& why);
+    bool homed_ = false;
+    uint32_t homingStartMs_ = 0;
     void referencingMachine_();
 
     void homing_awaiting_rough_home_sw();

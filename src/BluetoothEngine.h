@@ -2,6 +2,7 @@
 
 #include "Arduino.h"
 #include <atomic>
+#include <deque>
 #include <BLEDevice.h>
 #include <BLEUtils.h>
 #include <BLEServer.h>
@@ -52,7 +53,13 @@ private:
     std::atomic<bool> isConnected{false};
     std::atomic<bool> isAdvertising{false};
     std::atomic<bool> resetSentData_{false};
-    std::string sentData = ""; // loop() only
+    std::string sentData = ""; // loop() only: last message queued (duplicate suppression)
+
+    // Outgoing messages, loop() only. heartbeat() sends one per TX_MIN_INTERVAL_MS.
+    static const uint32_t TX_MIN_INTERVAL_MS = 5;
+    static const size_t TX_QUEUE_MAX = 80;
+    std::deque<std::string> txQueue_;
+    uint32_t lastTxMs_ = 0;
 
     void setConnected(bool connected);
     void setAdvertising(bool advertising);

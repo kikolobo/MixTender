@@ -86,6 +86,9 @@ bool parseJob(const std::string& request, std::vector<ParsedStep>& steps, size_t
 void rejectJob(size_t stepCount, const std::string& reason);
 std::string statusTextForState();
 void handleTrimRequest(const std::string& request);
+void onHomed(bool success);
+void didAbortJob(Dispatcher::AbortReason reason);
+bool homingFailed = false;
 
 // Calibration tray session (TM over BLE, G over serial). The tray is moved under a
 // valve so a calibration "open" pours into the cup instead of onto the machine.
@@ -176,6 +179,7 @@ void setup() {
   dispatcher->setWillBeginDispensingCallback(willBeginDispensing);
   dispatcher->setDidFinishDispensingCallback(didFinishDispensing);
   dispatcher->setDidFailDispensingCallback(didFailDispensing);
+  dispatcher->setDidAbortJobCallback(didAbortJob);
   dispatcher->setDidUpdateWeight(didUpdateWeight);
   dispatcher->setDidFinishJob(didFinishJob);
   dispatcher->setIsReady(isReady);
@@ -209,15 +213,31 @@ Serial.println("[INITIALIZING BLUETOOTH ENGINE]");
   });
 
 
-transport->refMachine([](bool success) {    
-    machineIsBooted = true;
-    Serial.println("[main][refMachineCB] Machine Homed");
-});
+transport->refMachine(onHomed);
 
 Serial.println("[main][setup] Done");
 
 
 ledMan->fadeTo(CRGB(0,0,0), CRGB(100,0,0), 1000);
+
+// Reset the board if loop() ever stops running for ~5 s (a hang), instead of
+// freezing. Safe: on boot every valve closes and every pump starts off.
+enableLoopWDT();
+}
+
+void onHomed(bool success) {
+  if (success) {
+    homingFailed = false;
+    machineIsBooted = true;
+    Serial.println("[main][refMachineCB] Machine Homed");
+  } else {
+    homingFailed = true;
+    machineIsBooted = false;
+    Serial.println("[main][refMachineCB] HOMING FAILED. Check the home switch, then press H to retry.");
+    if (ble != nullptr) {
+      ble->notifyStatus("Homing failed. Restart robot");
+    }
+  }
 }
 
 
@@ -363,7 +383,7 @@ if (Serial.available() > 0) {  // Check if data is available to read
        dispatcher->cancel();
        break;   
       case 'T':      
-       dispenser->tare();      
+       dispenser->tare(); // Non-blocking, refused during a pour
         break;            
       case '1':                    
        dispenser->selectValveForTrim(1, Valve::Position::OPEN);
@@ -416,6 +436,15 @@ if (Serial.available() > 0) {  // Check if data is available to read
       case 'V':
         dispenser->printValveTrims();
         break;
+      case 'H':
+        if (dispatcher->isServing()) {
+          Serial.println("[main] Ignored: a drink is being poured.");
+        } else {
+          endCalibrationSession();
+          machineIsBooted = false;
+          transport->refMachine(onHomed);
+        }
+        break;
       case 'X':
         if (dispatcher->isServing()) {
           Serial.println("[Calibration] Ignored: a drink is being poured.");
@@ -437,7 +466,7 @@ if (Serial.available() > 0) {  // Check if data is available to read
         Serial.println("  X        end calibration: close all valves, park tray");
         Serial.println(" Other:");
         Serial.println("  ? position   < > jog tray   P pump station   B test job   C cancel");
-        Serial.println("  T tare   S weight   A absolute weight   , . scale factor");
+        Serial.println("  T tare   S weight   A absolute weight   , . scale factor   H re-home");
         break;
       case 'P':
         transport->goToStation(7);
@@ -473,6 +502,18 @@ void didFinishDispensing(uint8_t step) {
 void didFailDispensing(uint8_t step) {
   ble->notifyStateIsFailed(step);
   Serial.println("[main][didFailDispensingCallback] Step: " + String(step));
+}
+
+void didAbortJob(Dispatcher::AbortReason reason) {
+  const char* text = "Stopped";
+  switch (reason) {
+    case Dispatcher::AbortReason::CUP_REMOVED:  text = "Cup removed! Stopped"; break;
+    case Dispatcher::AbortReason::NO_FLOW:      text = "Bottle empty? Stopped"; break;
+    case Dispatcher::AbortReason::POUR_TIMEOUT: text = "Pour too slow. Stopped"; break;
+    case Dispatcher::AbortReason::SCALE:        text = "Scale error. Stopped"; break;
+  }
+  Serial.println("[main][didAbortJobCallback] Job aborted: " + String(text));
+  ble->notifyStatus(text);
 }
 
 void didUpdateWeight(uint8_t step, float weight) {
@@ -513,6 +554,14 @@ void handleBleRequests() {
 
       // Never touch the Dispatcher's steps while a job is running or the tray
       // is still parking after a cancel: it is iterating over them.
+      if (homingFailed) {
+        rejectJob(stepCount, "Homing failed. Restart robot");
+        return;
+      }
+      if (!dispenser->isScaleResponding()) {
+        rejectJob(stepCount, "Scale error");
+        return;
+      }
       if (dispatcher->isServing() || !transport->isParked()) {
         if (calibrationTrayActive) {
           endCalibrationSession(); // App forgot TX: close valves and park so the next try works.
@@ -585,8 +634,7 @@ void sendTrimReply(const std::string& message) {
 void handleTrimRequest(const std::string& request) {
   if (request == "T?") {
     for (uint8_t id = 1; id <= dispenser->getValveCount(); id++) {
-      sendTrimReply(dispenser->valveTrimStatus(id));
-      delay(5); // Don't flood the BLE stack with back-to-back notifications.
+      sendTrimReply(dispenser->valveTrimStatus(id)); // Queued; BluetoothEngine paces sends.
     }
     return;
   }
@@ -737,6 +785,12 @@ void checkCalibrationTrayArrival() {
 }
 
 std::string statusTextForState() {
+  if (homingFailed) {
+    return "Homing failed. Restart robot";
+  }
+  if (!dispenser->isScaleResponding()) {
+    return "Scale error";
+  }
   if (!machineIsBooted) {
     return "Starting up...";
   }
@@ -753,8 +807,7 @@ std::string statusTextForState() {
 // screen finish instead of waiting forever.
 void rejectJob(size_t stepCount, const std::string& reason) {
   for (size_t i = 0; i < stepCount; i++) {
-    ble->notifyStateIsFailed(i);
-    delay(5); // Don't flood the BLE stack with back-to-back notifications.
+    ble->notifyStateIsFailed(i); // Queued; BluetoothEngine paces sends.
   }
   ble->notifyStatus(reason);
 }

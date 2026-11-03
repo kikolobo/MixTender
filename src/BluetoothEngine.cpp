@@ -66,6 +66,23 @@ void BluetoothEngine::heartbeat() {
     if (!isConnected && !isAdvertising) {
         startAdvertising();
     }
+
+    if (!isConnected) {
+        txQueue_.clear(); // Nothing to send to. A new session starts fresh (ehlo).
+        return;
+    }
+
+    // Send queued messages one at a time, at least TX_MIN_INTERVAL_MS apart, in
+    // order, without ever blocking loop().
+    if (!txQueue_.empty() && millis() - lastTxMs_ >= TX_MIN_INTERVAL_MS) {
+        std::string txString = std::move(txQueue_.front());
+        txQueue_.pop_front();
+        characteristicStatus->setValue(txString);
+        characteristicStatus->notify();
+        characteristicStatus->indicate();
+        lastTxMs_ = millis();
+        Serial.println("[BluetoothEngine] TXD: " + String(txString.c_str()));
+    }
 }
 
 void BluetoothEngine::setConnected(bool connected) {
@@ -137,12 +154,12 @@ void BluetoothEngine::sendData(std::string txString, bool force) {
         return;
     }
 
-    characteristicStatus->setValue(txString);
-    characteristicStatus->notify();
-    characteristicStatus->indicate();
-    
+    if (txQueue_.size() >= TX_QUEUE_MAX) {
+        Serial.println("[BluetoothEngine] TX queue full, dropping: " + String(txQueue_.front().c_str()));
+        txQueue_.pop_front();
+    }
+    txQueue_.push_back(txString); // Sent by heartbeat().
     sentData = txString;
-    Serial.println("[BluetoothEngine] TXD: " + String(txString.c_str()));
 } 
 
 

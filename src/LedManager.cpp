@@ -12,8 +12,25 @@ LedManager::LedManager(uint8_t dataPin) {
 
 
 void LedManager::heartbeat() {
-    if (currentFX_ == FX::FADEIN) {
+    // Compute fade frames only when a frame can actually be shown.
+    if (currentFX_ == FX::FADEIN && millis() - lastShowMs_ >= FRAME_INTERVAL_MS) {
         performFade_();
+    }
+    flush_();
+}
+
+// All rendering goes through here: mark the strip dirty and push it at most
+// MAX_FPS times per second. A pending frame is flushed by heartbeat().
+void LedManager::show_() {
+    dirty_ = true;
+    flush_();
+}
+
+void LedManager::flush_() {
+    if (dirty_ && millis() - lastShowMs_ >= FRAME_INTERVAL_MS) {
+        FastLED.show(); // ~2.3 ms for 75 LEDs
+        lastShowMs_ = millis();
+        dirty_ = false;
     }
 }
 
@@ -32,7 +49,7 @@ void LedManager::setAllLeds(CRGB color, bool shouldRender) {
 
     if (shouldRender == true) {
         if (changesExist == true) {
-         FastLED.show();  
+         show_();  
         }
     }    
 }
@@ -40,7 +57,7 @@ void LedManager::setAllLeds(CRGB color, bool shouldRender) {
 void LedManager::setLed(int index, CRGB color) {
     isUniform_ = false;
     leds_[index] = color; // Again, correcting: Direct assignment is correct
-    FastLED.show();
+    show_();
 }
 
 void LedManager::clearAllLeds() {
@@ -50,13 +67,13 @@ void LedManager::clearAllLeds() {
     for (int i = 0; i < numLeds_; i++) {
         leds_[i] = CRGB::Black; // Using CRGB::Black for clarity
     }
-    FastLED.show();
+    show_();
 }
 
 void LedManager::clearLed(int index) {
     isUniform_ = false;
     leds_[index] = CRGB::Black; // Using CRGB::Black for clarity
-    FastLED.show();
+    show_();
 }
  
  
@@ -102,7 +119,7 @@ void LedManager::clearLed(int index) {
         }
         currentColor_ = newColor;
         isUniform_ = true;
-        FastLED.show();
+        show_();
 
         if (done) {
             currentFX_ = FX::NONE;
@@ -140,7 +157,7 @@ void LedManager::clearLed(int index) {
 //             leds_[j] = newColor;
 //         }
 //         currentColor_ = newColor;
-//         FastLED.show(); // Update the LEDs
+//         show_(); // Update the LEDs
             
 //         prevTimeStamp_ = millis();
 //         currentBrightness_ += 1;
@@ -165,7 +182,7 @@ void LedManager::setRange(uint8_t start, uint8_t end, CRGB color) {
     for (int i = start; i < end && i < numLeds_; i++) {
         leds_[i] = color;
     }
-    FastLED.show();
+    show_();
 }
 
 void LedManager::trackTray(uint32_t position, CRGB color, CRGB backgroundColor) {

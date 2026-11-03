@@ -31,6 +31,10 @@ void Transport::heartbeat() {
   case Transport::MachineState::NOT_READY:
     break;    
   case Transport::MachineState::HOMING: 
+  if (millis() - homingStartMs_ > HOMING_TIMEOUT_MS) {
+    homingFailed_("timed out after " + String(HOMING_TIMEOUT_MS / 1000) + " s");
+    break;
+  }
   if (homingStage_ == Transport::HomingStage::SEEKING_HOME) {
     homing_awaiting_rough_home_sw();
   }
@@ -79,6 +83,8 @@ void Transport::refMachine(DidHomeCallback didHomeCallback) {
     didHomeCallback_ = std::make_shared<DidHomeCallback>(didHomeCallback);
   } 
   
+  homed_ = false;
+  homingStartMs_ = millis();
   setState_(Transport::MachineState::HOMING);
   homingStage_ = Transport::HomingStage::SEEKING_HOME;
   motor_->stop();  
@@ -98,6 +104,10 @@ void Transport::homing_awaiting_rough_home_sw() {
     homingStage_ = Transport::HomingStage::RETRACTING;
     return;
   }
+  if (motor_->getCurrentPosition() <= 0) {
+    // Travelled the full search distance without hitting the switch.
+    homingFailed_("home switch not found");
+  }
 }
 
 void Transport::homing_awaiting_retract() {
@@ -115,6 +125,8 @@ void Transport::homing_awaiting_home_sw_refining() {
     Serial.println("[Transport][refMachine] -> Unit is fully HOMED... Parking");
     motor_->stop();  
     motor_->setCurrentPosition(0);    
+    homingStage_ = Transport::HomingStage::PARKED;
+    homed_ = true;
     goPark(50);
 
     if (didHomeCallback_ != nullptr) {
@@ -123,6 +135,24 @@ void Transport::homing_awaiting_home_sw_refining() {
 
     return;
   }
+  if (motor_->getCurrentPosition() <= -10) {
+    homingFailed_("home switch not found while refining");
+  }
+}
+
+void Transport::homingFailed_(const String& why) {
+  Serial.println("[Transport][refMachine] -> HOMING FAILED: " + why + ". Tray position unknown; moves disabled.");
+  motor_->stop();
+  homingStage_ = Transport::HomingStage::NONE;
+  homed_ = false;
+  setState_(Transport::MachineState::FAULT);
+  if (didHomeCallback_ != nullptr) {
+    (*didHomeCallback_)(false);
+  }
+}
+
+bool Transport::isHomed() {
+  return homed_;
 }
 
 void Transport::setState_(MachineState state) {
@@ -143,6 +173,10 @@ void Transport::goPark(uint16_t speed) {
 void Transport::goToStation(uint8_t stationIndex, uint16_t speed) {
   if (stationIndex >= stations_.size()) {
     Serial.println("[Transport][goToStation] -> Station index out of range");
+    return;
+  }
+  if (!homed_) {
+    Serial.println("[Transport][goToStation] -> Not homed. Ignoring move to station " + String(stationIndex));
     return;
   }
   

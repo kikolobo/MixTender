@@ -35,6 +35,12 @@ FX getCurrentFX() { return currentFX_; }
 private:    
     uint8_t calculateBrightness_(CRGB color);
     void performFade_();
+    void show_();   // request a frame (rate-limited)
+    void flush_();  // push a pending frame if the interval has passed
+    static const uint32_t MAX_FPS = 30;
+    static const uint32_t FRAME_INTERVAL_MS = 1000 / MAX_FPS;
+    uint32_t lastShowMs_ = 0;
+    bool dirty_ = false;
     int numLeds_;
     uint8_t dataPin_;  
     int prevTimeStamp_; 

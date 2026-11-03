@@ -22,31 +22,50 @@ Dispenser::Dispenser(uint8_t dat_pin, uint8_t sck_pin, float kFactor,  float emp
     filteredValue_ = 0.0;
     awaitingClosureTimeStampMS_ = 0;
     awaitingStabilityTimeStampMS_ = 0;
-    Serial.println("[Dispenser][Constructor] Dispenser created: " + String(scale_->get_units(1)));
+    // Don't read the scale here: HX711::read() waits forever if the chip doesn't answer.
+    Serial.println("[Dispenser][Constructor] Dispenser created.");
 };
 
 
 void Dispenser::heartbeat() {
-    
+
+    // One HX711 sample per call, only when the chip has data ready, so this
+    // never waits. (HX711::read() blocks forever if called when not ready.)
     if (scale_->is_ready()) {
-        float alpha = 0.4; // Smoothing factor. Adjust as needed.
-        float rawValue = scale_->get_units(1); // Get the current raw value        
-        filteredValue_ = alpha * rawValue + (1 - alpha) * filteredValue_; // Apply the low-pass filter
+        long raw = scale_->read();
+        lastSampleMs_ = millis();
 
-        float resolution = 0.14; // Target resolution, e.g., 0.1 kg
-        float finalValue = round(filteredValue_ / resolution) * resolution; // Reduce resolution
+        if (state_ == DispenserState::TARING) {
+            tareSum_ += raw;
+            tareCount_++;
+        } else {
+            float alpha = 0.4; // Smoothing factor. Adjust as needed.
+            float rawValue = (raw - scale_->get_offset()) / scale_->get_scale(); // = get_units(1)
+            filteredValue_ = alpha * rawValue + (1 - alpha) * filteredValue_; // Apply the low-pass filter
 
-
-        latestWeight_ = finalValue; //fabs(scale_->get_units(5));
-        // Serial.println("[Dispenser][heartbeat] Latest weight: " A+ String(latestWeight_) + "g");
+            float resolution = 0.14; // Target resolution, e.g., 0.1 kg
+            latestWeight_ = round(filteredValue_ / resolution) * resolution; // Reduce resolution
+        }
     }
 
-    if (state_ == DispenserState::READY) {
+    if (state_ == DispenserState::READY || state_ == DispenserState::FINISHED || state_ == DispenserState::FAILED) {
         return; //Skip all the noise if we're not dispensing.
     }
 
-    if (state_ == DispenserState::FINISHED) {
-        return; //Skip all the noise if we're done dispensing.
+    if (state_ == DispenserState::TARING) {
+        if (tareCount_ >= TARE_SAMPLES) {
+            scale_->set_offset(tareSum_ / tareCount_);
+            // Drop the pre-tare history from the low-pass filter, otherwise the old
+            // reading decays into the new step and can end small pours early.
+            filteredValue_ = 0.0;
+            latestWeight_ = 0.0;
+            Serial.println("[Dispenser][tare] Scale tared (" + String(tareCount_) + " samples).");
+            state_ = afterTareState_;
+        } else if (millis() - tareStartMs_ > TARE_TIMEOUT_MS) {
+            Serial.println("[Dispenser][tare] ERROR: scale not responding (" + String(tareCount_) + "/" + String(TARE_SAMPLES) + " samples).");
+            fail_(FailureReason::SCALE);
+            return;
+        }
     }
 
     if (state_ == DispenserState::AWAITING_CLOSURE) {
@@ -58,14 +77,18 @@ void Dispenser::heartbeat() {
 
     if (state_ == DispenserState::AWAITING_STABILITY) {
         if (millis() - awaitingStabilityTimeStampMS_ > 500) {
-            tare(); // Tare only once the tray has settled after moving.
-            state_ = DispenserState::STABLE;
+            // Tare only once the tray has settled after moving, then pour.
+            startTare_(DispenserState::STABLE);
+            return;
         }
     }
 
     if (state_ == DispenserState::STABLE) {             
             Serial.println("[Dispenser][STABLE] Station Begin weight: " + String(getLatestWeight()) + "g");            
             state_ = DispenserState::DISPENSING;
+            pourStartMs_ = millis();
+            lastProgressMs_ = pourStartMs_;
+            progressWeight_ = latestWeight_;
             if (dispenseType_ == DispenseType::PUMP) {
                 pumps_[pourDeviceIndex_]->on();
             } else {
@@ -74,21 +97,65 @@ void Dispenser::heartbeat() {
     }
 
     if (state_ == DispenserState::DISPENSING) {
+        uint32_t now = millis();
         if (latestWeight_ >= targetWeight_) {
             Serial.println("[Dispenser][DISPENSING] Dispensing complete.");
             finishDispensing_();
+        } else if (now - lastSampleMs_ > SCALE_SILENT_MS) {
+            // Weight is frozen: we'd never see the target. Stop now.
+            Serial.println("[Dispenser][DISPENSING] ERROR: scale stopped responding.");
+            fail_(FailureReason::SCALE);
+        } else if (now - pourStartMs_ > POUR_MAX_MS) {
+            Serial.println("[Dispenser][DISPENSING] ERROR: pour took longer than " + String(POUR_MAX_MS) + " ms.");
+            fail_(FailureReason::POUR_TIMEOUT);
+        } else {
+            if (latestWeight_ >= progressWeight_ + NO_FLOW_MIN_GRAMS) {
+                progressWeight_ = latestWeight_;
+                lastProgressMs_ = now;
+            } else if (now - lastProgressMs_ > NO_FLOW_TIMEOUT_MS) {
+                Serial.println("[Dispenser][DISPENSING] ERROR: no flow for " + String(NO_FLOW_TIMEOUT_MS) + " ms (empty bottle?). Poured " + String(latestWeight_) + "g of " + String(targetWeight_) + "g.");
+                fail_(FailureReason::NO_FLOW);
+            }
         }
     }
 };
 
-void Dispenser::tare() {
-    Serial.println("[Dispenser][tare] Scale Tared.");
-    scale_->tare();
-    // Drop the pre-tare history from the low-pass filter, otherwise the old
-    // reading decays into the new step and can end small pours early.
-    filteredValue_ = 0.0;
-    latestWeight_ = 0.0;
+void Dispenser::startTare_(DispenserState afterTare) {
+    tareSum_ = 0;
+    tareCount_ = 0;
+    tareStartMs_ = millis();
+    afterTareState_ = afterTare;
+    state_ = DispenserState::TARING;
+}
+
+// Manual tare (serial "T"). Non-blocking: completes over the next ~TARE_SAMPLES readings.
+bool Dispenser::tare() {
+    if (state_ != DispenserState::READY && state_ != DispenserState::FINISHED && state_ != DispenserState::FAILED) {
+        Serial.println("[Dispenser][tare] Busy dispensing. Not taring.");
+        return false;
+    }
+    Serial.println("[Dispenser][tare] Taring...");
+    startTare_(DispenserState::FINISHED);
+    return true;
 };
+
+bool Dispenser::isScaleResponding() {
+    return lastSampleMs_ != 0 && millis() - lastSampleMs_ <= SCALE_SILENT_MS;
+}
+
+Dispenser::FailureReason Dispenser::getFailureReason() {
+    return failureReason_;
+}
+
+void Dispenser::fail_(FailureReason reason) {
+    if (dispenseType_ == DispenseType::PUMP) {
+        pumps_[pourDeviceIndex_]->off();
+    } else {
+        valves_[pourDeviceIndex_]->setPosition(Valve::Position::CLOSED);
+    }
+    failureReason_ = reason;
+    state_ = DispenserState::FAILED;
+}
 
 
 void Dispenser::selectValveForTrim(uint32_t valveId, Valve::Position position) {
@@ -235,6 +302,7 @@ bool Dispenser::beginDispensingPump(uint8_t pumpIndex, float targetWeight) {
     }
 
     dispenseType_ = DispenseType::PUMP;
+    failureReason_ = FailureReason::NONE;
     state_ = DispenserState::AWAITING_STABILITY;
     Serial.println("[Dispenser][beginDispensing] Beginning dispensing on pump IDX: " + String(pumpIndex));    
     targetWeight_ = targetWeight;
@@ -251,6 +319,7 @@ bool Dispenser::beginDispensingValve(uint8_t valveIndex, float targetWeight) {
     }
 
     dispenseType_ = DispenseType::VALVE;
+    failureReason_ = FailureReason::NONE;
     state_ = DispenserState::AWAITING_STABILITY;
     Serial.println("[Dispenser][beginDispensing] Beginning dispensing on valve IDX: " + String(valveIndex));    
     targetWeight_ = targetWeight;
@@ -288,6 +357,10 @@ void Dispenser::abortDispensing() {
 
     if (state_ == DispenserState::READY || state_ == DispenserState::FINISHED) {
         return; // Nothing in progress, no output to switch off.
+    }
+    if (state_ == DispenserState::FAILED) {
+        state_ = DispenserState::FINISHED; // Output already off.
+        return;
     }
 
     if (dispenseType_ == DispenseType::PUMP) {
