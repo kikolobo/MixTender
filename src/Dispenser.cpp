@@ -34,6 +34,7 @@ void Dispenser::heartbeat() {
     if (scale_->is_ready()) {
         long raw = scale_->read();
         lastSampleMs_ = millis();
+        measureSampleRate_();
 
         if (state_ == DispenserState::TARING) {
             tareSum_ += raw;
@@ -138,6 +139,34 @@ bool Dispenser::tare() {
     startTare_(DispenserState::FINISHED);
     return true;
 };
+
+// Count samples over the first ~2 s and report the HX711 rate once. The rate is
+// set in hardware by the module's RATE pin (10 SPS = low, 80 SPS = high).
+void Dispenser::measureSampleRate_() {
+    if (rateReported_) {
+        return;
+    }
+    if (rateWindowStartMs_ == 0) {
+        rateWindowStartMs_ = lastSampleMs_;
+        rateSampleCount_ = 0;
+        return;
+    }
+    rateSampleCount_++;
+    uint32_t elapsed = lastSampleMs_ - rateWindowStartMs_;
+    if (elapsed >= 2000) {
+        measuredSps_ = rateSampleCount_ * 1000.0 / elapsed;
+        rateReported_ = true;
+        Serial.println("[Dispenser] Scale rate: " + String(measuredSps_, 1) + " SPS (HX711 RATE pin: ~10 = low, ~80 = high)");
+    }
+}
+
+float Dispenser::getSampleRate() {
+    return measuredSps_;
+}
+
+float Dispenser::getLastPourWeight() {
+    return lastPourWeight_;
+}
 
 bool Dispenser::isScaleResponding() {
     return lastSampleMs_ != 0 && millis() - lastSampleMs_ <= SCALE_SILENT_MS;
@@ -411,6 +440,7 @@ void Dispenser::resetDispensing_(bool skipCallback) {
         index = pumpIndex_;
     } 
 
+    lastPourWeight_ = latestWeight_; // Final weight of this step, before it's cleared below.
     if (completionCallback_ != nullptr && skipCallback == false) { completionCallback_(dispenseType_, valveIndex_, latestWeight_); }
 
     state_ = DispenserState::FINISHED;

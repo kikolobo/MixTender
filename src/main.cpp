@@ -68,7 +68,6 @@ BluetoothEngine *ble;
 std::mutex bleRequestsMutex;
 std::deque<std::string> bleRequests;
 std::atomic<bool> isConnected(false);
-Dispatcher::DispatcherState lastState = Dispatcher::DispatcherState::UNKNOWN;
 
 void handleBleRequests();
 void handleSerialRequests();
@@ -90,6 +89,15 @@ void onHomed(bool success);
 void didAbortJob(Dispatcher::AbortReason reason);
 bool homingFailed = false;
 
+// Robot status pushed to the app (see updateRobotStatus).
+bool okToServe();                 // What $1 means to the app: "SERVE may be shown"
+const char* idleStatusText();     // $0 text for idle/busy states, nullptr when a job event text should stand
+void updateRobotStatus();
+int8_t lastOkToServe = -1;        // -1 = not sent yet
+std::string lastIdleText;
+bool cupNotEmpty = false;         // Cup on the scale is heavier than MAX_START_GRAMS (with hysteresis)
+std::atomic<bool> bleDisconnectedFlag(false);
+
 // Calibration tray session (TM over BLE, G over serial). The tray is moved under a
 // valve so a calibration "open" pours into the cup instead of onto the machine.
 bool calibrationTrayActive = false;   // Tray was moved for calibration: park it on TX/X.
@@ -109,7 +117,6 @@ void didFailDispensing(uint8_t step);
 void didUpdateWeight(uint8_t step, float weight);
 void didFinishJob();
 void isReady();
-void updateCupState();
 
 void setup() {
   
@@ -206,6 +213,7 @@ Serial.println("[INITIALIZING BLUETOOTH ENGINE]");
 
   ble->setDidDisconnectConnectCallback([]() {        
       isConnected = false;
+      bleDisconnectedFlag = true; // loop() aborts a running job (the app won't resume it).
       // Don't leave a valve open if the app disconnects mid-calibration.
       // Queued so it runs on loop(), not the BLE task (ignored while pouring).
       std::lock_guard<std::mutex> lock(bleRequestsMutex);
@@ -257,34 +265,76 @@ void loop() {
                 ledMan->fadeTo(ledMan->getCurrentColor(), CRGB(0,0,100), 200);                   
           } else if (state == Dispatcher::DispatcherState::READY) {                
                 ledMan->fadeTo(ledMan->getCurrentColor(), CRGB(0,100,0), 350);     
-                ble->notifyStatus("Ready!");
           } else if (state == Dispatcher::DispatcherState::AWAITING_REMOVAL) {         
             ledMan->trackTray(transport->getCurrentPosition(), CRGB(0,255,0), CRGB(10,10,10));        
           } else if (dispatcher->isServing() == true) {
             ledMan->trackTray(transport->getCurrentPosition(), CRGB(0,255,255), CRGB(0,0,20));          
           }          
           
-      if (state != lastState) { 
-        updateCupState();
-        lastState = state;
-      }
-      
     }
 
+  if (bleDisconnectedFlag.exchange(false) && dispatcher->abort(Dispatcher::AbortReason::DISCONNECTED)) {
+    Serial.println("[main][loop] App disconnected mid-job. Job stopped.");
+  }
+  updateRobotStatus();
   checkCalibrationTrayArrival();
   handleSerialRequests();
   handleBleRequests();      
 }
 
-void updateCupState() {
+bool okToServe() {
+  return !homingFailed && machineIsBooted && dispenser->isScaleResponding()
+      && dispatcher->getState() == Dispatcher::DispatcherState::READY
+      && transport->isParked() && !cupNotEmpty;
+}
+
+const char* idleStatusText() {
+  if (homingFailed)                                               return "Homing failed. Restart robot";
+  if (!dispenser->isScaleResponding())                            return "Scale error";
+  if (transport->getState() == Transport::MachineState::HOMING)   return "Homing...";
+  if (!machineIsBooted)                                           return "Starting up...";
+  if (dispatcher->isServing())                                    return nullptr; // Job texts (Still Working!, ...)
+  switch (dispatcher->getState()) {
+    case Dispatcher::DispatcherState::AWAITING_REMOVAL: return nullptr; // Keep "Get your drink!" / the abort reason
+    case Dispatcher::DispatcherState::JOB_COMPLETE:     return nullptr; // Keep "Cancelled" while parking
+    default: break;
+  }
+  if (calibrationTrayActive)                                      return "Calibrating...";
+  if (!transport->isParked())                                     return "Parking...";
+  if (dispatcher->getState() == Dispatcher::DispatcherState::NO_CUP) return "Please add a cup";
+  if (cupNotEmpty)                                                return "Cup is not empty";
+  return "Ready!";
+}
+
+// Push $1 (OK to serve) and the idle $0 text to the app whenever they change, so
+// SERVE is hidden before the user taps it instead of after a rejected job.
+void updateRobotStatus() {
   Dispatcher::DispatcherState state = dispatcher->getState();
-  if (state == Dispatcher::DispatcherState::NO_CUP) {
-          Serial.println("[main][loop] No Cup Detected");
-          ble->notifyCupStatus(false);
-        } else {
-          Serial.println("[main][loop] Cup Detected");
-          ble->notifyCupStatus(true);
-        }  
+  if (state == Dispatcher::DispatcherState::READY) {
+    float w = dispenser->getAbsoluteWeight();
+    if (w > MAX_START_GRAMS) {
+      cupNotEmpty = true;
+    } else if (w < MAX_START_GRAMS - 10.0) {
+      cupNotEmpty = false; // 10 g hysteresis so a cup near the limit doesn't flicker
+    }
+  } else if (state == Dispatcher::DispatcherState::NO_CUP) {
+    cupNotEmpty = false;
+  }
+
+  bool ok = okToServe();
+  if ((int8_t)ok != lastOkToServe) {
+    Serial.println(String("[main][status] OK to serve: ") + (ok ? "yes" : "no"));
+    ble->notifyCupStatus(ok);
+    lastOkToServe = ok;
+  }
+
+  const char* text = idleStatusText();
+  if (text == nullptr) {
+    lastIdleText = ""; // A job/event text is showing; re-send the idle text when we're back.
+  } else if (lastIdleText != text) {
+    ble->notifyStatus(text);
+    lastIdleText = text;
+  }
 }
 
 
@@ -472,7 +522,7 @@ if (Serial.available() > 0) {  // Check if data is available to read
         transport->goToStation(7);
         break;
       case 'S':
-        Serial.println("[main][loop] Weight: " + String(dispenser->getLatestWeight()));
+        Serial.println("[main][loop] Weight: " + String(dispenser->getLatestWeight()) + "g (scale " + String(dispenser->getSampleRate(), 1) + " SPS)");
         break;
       case 'A':
         Serial.println("[main][loop] Absolute Weight: " + String(dispenser->getAbsoluteWeight()));
@@ -511,6 +561,7 @@ void didAbortJob(Dispatcher::AbortReason reason) {
     case Dispatcher::AbortReason::NO_FLOW:      text = "Bottle empty? Stopped"; break;
     case Dispatcher::AbortReason::POUR_TIMEOUT: text = "Pour too slow. Stopped"; break;
     case Dispatcher::AbortReason::SCALE:        text = "Scale error. Stopped"; break;
+    case Dispatcher::AbortReason::DISCONNECTED: text = "Disconnected. Stopped"; break;
   }
   Serial.println("[main][didAbortJobCallback] Job aborted: " + String(text));
   ble->notifyStatus(text);
@@ -526,8 +577,8 @@ void didFinishJob() {
 }
 
 void isReady() {
-  Serial.println("[main][isReadyCallback] Ready");
-  ble->notifyStatus("Ready!");
+  // Cup removed after a drink. updateRobotStatus() sends the right text/state.
+  Serial.println("[main][isReadyCallback] Drink removed");
 }
 
 
@@ -609,7 +660,7 @@ void handleBleRequests() {
       }
     } else if (rxdData_ == "ehlo") {
       Serial.println("[Main][handleBleRequests] Ping Received");
-      updateCupState();
+      ble->notifyCupStatus(okToServe());
       ble->notifyStatus(statusTextForState());
     } else if (!rxdData_.empty() && rxdData_[0] == 'T') {
       handleTrimRequest(rxdData_);
@@ -784,15 +835,11 @@ void checkCalibrationTrayArrival() {
   calibrationTrayTarget = -1; // Arrived, or something else moved the tray: stop waiting.
 }
 
+// Full status text for ehlo: the idle text, or what a job state means.
 std::string statusTextForState() {
-  if (homingFailed) {
-    return "Homing failed. Restart robot";
-  }
-  if (!dispenser->isScaleResponding()) {
-    return "Scale error";
-  }
-  if (!machineIsBooted) {
-    return "Starting up...";
+  const char* idle = idleStatusText();
+  if (idle != nullptr) {
+    return idle;
   }
   switch (dispatcher->getState()) {
     case Dispatcher::DispatcherState::NO_CUP:           return "Please add a cup";

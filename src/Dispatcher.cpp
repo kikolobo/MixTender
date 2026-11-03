@@ -93,6 +93,10 @@ void Dispatcher::servingPhase_() {
     }
 
     if (dispenser_->getState() == Dispenser::DispenserState::FINISHED) {
+        // Final weight, always before S<n>=C (sent 200 ms later), never throttled.
+        if (didUpdateWeightCallback_) {
+            didUpdateWeightCallback_(currentStep_, dispenser_->getLastPourWeight());
+        }
         Serial.println("[Dispatcher][servingPhase_] Dispensing Complete.");
         state_ = DispatcherState::AWAITING_END_DELAY;
         steps_[currentStep_].endDispensingTimeStampMS = millis();
@@ -100,8 +104,10 @@ void Dispatcher::servingPhase_() {
 
     // Only report weight while this step's output is open or settling. Before
     // that, the reading still holds the pre-tare weight (cup or previous step).
-    if (didUpdateWeightCallback_ && dispenser_->isPouring()) {
+    // Capped at ~10 Hz whatever the scale rate.
+    if (didUpdateWeightCallback_ && dispenser_->isPouring() && millis() - lastWeightReportMs_ >= WEIGHT_REPORT_INTERVAL_MS) {
             didUpdateWeightCallback_(currentStep_, dispenser_->getLatestWeight());
+            lastWeightReportMs_ = millis();
     }
 
 }
@@ -181,6 +187,15 @@ void Dispatcher::abortJob_(AbortReason reason) {
     if (didAbortJobCallback_) {
         didAbortJobCallback_(reason);
     }
+}
+
+bool Dispatcher::abort(AbortReason reason) {
+    if (!isServing()) {
+        return false;
+    }
+    Serial.println("[Dispatcher][abort] Aborting job from outside (e.g. BLE disconnect).");
+    abortJob_(reason);
+    return true;
 }
 
 void Dispatcher::reset_() {

@@ -59,6 +59,8 @@ public:
     bool tare();                 // Non-blocking; false if a pour is in progress
     bool isScaleResponding();    // A reading arrived within SCALE_SILENT_MS
     FailureReason getFailureReason();
+    float getSampleRate();       // Measured HX711 samples/s, 0 until known (~2 s after boot)
+    float getLastPourWeight();   // Final weight of the last completed step
     DispenserState getState();
     bool isPouring(); // Output open, or closing and settling: weight readings belong to this step.
     float getLatestWeight();
@@ -95,6 +97,12 @@ private:
     uint32_t pourStartMs_ = 0;
     uint32_t lastProgressMs_ = 0;
     float progressWeight_ = 0.0;
+    float lastPourWeight_ = 0.0;
+    void measureSampleRate_();
+    uint32_t rateWindowStartMs_ = 0;
+    uint32_t rateSampleCount_ = 0;
+    float measuredSps_ = 0.0;
+    bool rateReported_ = false;
     void printValveTrim_(uint8_t index);
     bool isValveTrimSaved_(uint8_t index);
     bool isValidValveId_(uint8_t valveId);

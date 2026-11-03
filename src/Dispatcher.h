@@ -26,7 +26,10 @@ public:
         NO_FLOW,
         POUR_TIMEOUT,
         SCALE,
+        DISCONNECTED,   // App disconnected mid-job
     };
+
+    static const uint32_t WEIGHT_REPORT_INTERVAL_MS = 100; // W<n> updates at most ~10 Hz
 
     static constexpr float CUP_REMOVED_GRAMS = 3.0;      // Same threshold as cup detection
     static const uint32_t CUP_REMOVED_DEBOUNCE_MS = 300;
@@ -69,6 +72,7 @@ void clearSteps();
 void addStep(Dispenser::DispenseType type,  uint8_t stationIndex, uint8_t pourDeviceIndex, float targetWeight);
 bool start();
 bool cancel(); // false if no job was in progress
+bool abort(AbortReason reason); // Safety stop from outside; false if no job was in progress
 bool isServing();
 
 void setWillBeginDispensingCallback(WillBeginDispensing callback);
@@ -94,6 +98,7 @@ private:
     void advanceStep_();
     void abortJob_(AbortReason reason);
     uint32_t cupMissingSinceMs_ = 0;
+    uint32_t lastWeightReportMs_ = 0;
     void reset_();
 
     std::shared_ptr<Dispenser> dispenser_;
