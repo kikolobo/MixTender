@@ -13,6 +13,7 @@
 #define STATUS_UUID "6bcdd021-ffa5-4522-9454-a21d025d6562"
 
 #define DEVICE_NAME "MixTender"
+#define BLE_MTU 185 // Largest ATT MTU we accept (messages up to BLE_MTU - 3 bytes)
 
 class BluetoothEngine : public BLEServerCallbacks {
 public:
@@ -70,6 +71,7 @@ private:
         BluetoothEngine *engine;
         void onConnect(BLEServer *server) override;
         void onDisconnect(BLEServer *server) override;
+        void onMtuChanged(BLEServer *server, esp_ble_gatts_cb_param_t *param) override;
     };
 
     class StatusCallbacks : public BLECharacteristicCallbacks {

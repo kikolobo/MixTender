@@ -3,7 +3,13 @@
 
 BluetoothEngine::BluetoothEngine() {
     Serial.println("[BluetoothEngine] Initializing");
-    BLEDevice::init(DEVICE_NAME);    
+    BLEDevice::init(DEVICE_NAME);
+    // Accept up to BLE_MTU bytes when the phone negotiates (iOS asks for ~185+).
+    // With the 23-byte default, messages over 20 bytes (long $0= texts) can be cut off.
+    esp_err_t mtuErr = BLEDevice::setMTU(BLE_MTU);
+    if (mtuErr != ESP_OK) {
+        Serial.println("[BluetoothEngine] WARNING: setMTU(" + String(BLE_MTU) + ") failed: " + String(mtuErr));
+    }
     server = BLEDevice::createServer();
 
     ServerCallbacks *serverCallbacks = new ServerCallbacks();
@@ -169,6 +175,11 @@ void BluetoothEngine::ServerCallbacks::onConnect(BLEServer *server) {
     Serial.println("[ServerCallbacks] Connected");
     engine->setConnected(true);
     engine->setAdvertising(false);
+}
+
+void BluetoothEngine::ServerCallbacks::onMtuChanged(BLEServer *server, esp_ble_gatts_cb_param_t *param) {
+    // Runs on the BLE task: log only.
+    Serial.println("[ServerCallbacks] MTU negotiated: " + String(param->mtu.mtu) + " (max message " + String(param->mtu.mtu - 3) + " bytes)");
 }
 
 void BluetoothEngine::ServerCallbacks::onDisconnect(BLEServer *server) {

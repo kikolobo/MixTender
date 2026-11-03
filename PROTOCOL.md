@@ -51,9 +51,10 @@ treats them all the same, so it doesn't matter which one a message arrives on.
 discovers everything, subscribes, then writes `ehlo`. On unexpected disconnect the app
 rescans. The robot restarts advertising after a disconnect.
 
-**Sizes:** robot messages are kept ≤ 20 bytes where possible (the default MTU).
-`$0=` texts can be longer; iOS negotiates a larger MTU. App writes can exceed 20
-bytes (long writes work).
+**Sizes:** the robot accepts an ATT MTU up to **185** (messages up to 182 bytes). iOS
+negotiates it automatically on connect; the robot logs the result on USB serial
+(`MTU negotiated: …`). `S`/`W`/`T` messages stay ≤ 20 bytes anyway; `$0=` texts can be
+longer. App writes can exceed 20 bytes (long writes also work).
 
 **Rate:** weight updates (`W`) are capped at ~10 Hz per step (the final `W` of a step
 is always sent). All messages are queued and sent in order, ≥ 5 ms apart, so bursts
@@ -362,6 +363,8 @@ BLE (backward compatible; requested by the app side):
 - `W` updates capped at ~10 Hz; the final `W` of a step is always sent before its `S`.
 
 Firmware: the HX711 sample rate is measured at boot and logged (`[Dispenser] Scale rate: …`).
+The robot now accepts an MTU up to 185 (`BLEDevice::setMTU`), so long `$0=` texts aren't cut
+at 20 bytes. No wire-format change.
 
 ## v5 — 2026-11-03
 BLE (backward compatible):
