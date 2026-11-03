@@ -154,6 +154,17 @@ bool Dispenser::isValveTrimSaved_(uint8_t index) {
     return saved;
 }
 
+uint8_t Dispenser::getSelectedTrimValveId() {
+    return trimValveIndex_ < 0 ? 0 : trimValveIndex_ + 1;
+}
+
+Valve::Position Dispenser::getValvePosition(uint8_t valveId) {
+    if (!isValidValveId_(valveId)) {
+        return Valve::Position::CLOSED;
+    }
+    return valves_[valveId - 1]->getPosition();
+}
+
 uint8_t Dispenser::getValveCount() {
     return valves_.size();
 }

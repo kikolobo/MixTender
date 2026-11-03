@@ -86,6 +86,17 @@ bool parseJob(const std::string& request, std::vector<ParsedStep>& steps, size_t
 void rejectJob(size_t stepCount, const std::string& reason);
 std::string statusTextForState();
 void handleTrimRequest(const std::string& request);
+
+// Calibration tray session (TM over BLE, G over serial). The tray is moved under a
+// valve so a calibration "open" pours into the cup instead of onto the machine.
+bool calibrationTrayActive = false;   // Tray was moved for calibration: park it on TX/X.
+int8_t calibrationTrayTarget = -1;    // Station we're moving to (-1 = none pending).
+bool calibrationTrayNotifyBle = false; // Send TM<id>=at on arrival.
+const char* checkCalibrationTrayMove(); // nullptr if allowed, else TE code
+void moveTrayForCalibration(uint8_t station, bool fromBle);
+const char* checkValveOpenAllowed(uint8_t valveId); // nullptr if allowed, else TE code
+void endCalibrationSession();
+void checkCalibrationTrayArrival();
 void sendTrimReply(const std::string& message);
 
 //Callbacks from dispatcher (prototypes)
@@ -240,6 +251,7 @@ void loop() {
       
     }
 
+  checkCalibrationTrayArrival();
   handleSerialRequests();
   handleBleRequests();      
 }
@@ -259,6 +271,47 @@ void updateCupState() {
 void handleSerialRequests() {
 if (Serial.available() > 0) {  // Check if data is available to read
     auto receivedChar = Serial.read(); // Read the incoming byte
+
+    // "G" then a digit 0-6: move the tray under that valve for calibration (0 = park).
+    static bool awaitingStationDigit = false;
+    if (awaitingStationDigit) {
+      awaitingStationDigit = false;
+      if (receivedChar < '0' || receivedChar > '6') {
+        Serial.println("[Calibration] G needs a station 0-6. Cancelled.");
+        return;
+      }
+      const char* error = checkCalibrationTrayMove();
+      if (error != nullptr) {
+        Serial.println("[Calibration] Can't move tray now (" + String(error) + ").");
+        return;
+      }
+      moveTrayForCalibration(receivedChar - '0', false);
+      return;
+    }
+    if (receivedChar == 'G') {
+      awaitingStationDigit = true;
+      Serial.println("[Calibration] Station? (0-6)");
+      return;
+    }
+
+    // Opening (or nudging an open valve) pours: only with the tray under that valve.
+    {
+      uint8_t openId = 0;
+      if (receivedChar >= '1' && receivedChar <= '6') {
+        openId = receivedChar - '0';
+      } else if ((receivedChar == '+' || receivedChar == '-') && dispenser->getSelectedTrimValveId() != 0
+                 && dispenser->getValvePosition(dispenser->getSelectedTrimValveId()) == Valve::Position::OPEN) {
+        openId = dispenser->getSelectedTrimValveId();
+      }
+      if (openId != 0 && !dispatcher->isServing()) {
+        const char* error = checkValveOpenAllowed(openId);
+        if (error != nullptr) {
+          Serial.println("[Calibration] Valve " + String(openId) + " not opened: tray "
+                         + (strcmp(error, "moving") == 0 ? String("still moving.") : "not under it. Press G" + String(openId) + " first."));
+          return;
+        }
+      }
+    }
 
     // Valve calibration keys move servos: never while a job is running.
     if (strchr("123456qwerty+-@!", receivedChar) != NULL && dispatcher->isServing()) {
@@ -359,15 +412,25 @@ if (Serial.available() > 0) {  // Check if data is available to read
       case 'V':
         dispenser->printValveTrims();
         break;
+      case 'X':
+        if (dispatcher->isServing()) {
+          Serial.println("[Calibration] Ignored: a drink is being poured.");
+        } else {
+          endCalibrationSession(); // Closes all valves, parks if the tray was moved.
+          Serial.println("[Calibration] All valves closed.");
+        }
+        break;
       case 'h':
         Serial.println("--- MixTender serial commands ---");
         Serial.println(" Valve calibration (blocked while pouring):");
-        Serial.println("  1-6      select valve 1-6, move OPEN");
+        Serial.println("  G0-G6    move tray under valve 1-6 (G0 = park). Needed before opening");
+        Serial.println("  1-6      select valve 1-6, move OPEN (tray must be under it)");
         Serial.println("  q w e r t y  select valve 1-6, move CLOSED");
         Serial.println("  + / -    nudge selected valve's current position by 1 deg");
         Serial.println("  @        reset selected valve to defaults (50/147), not saved");
         Serial.println("  !        save selected valve's open+closed trims to flash");
         Serial.println("  V        list all valves: angles, trims, saved/defaults");
+        Serial.println("  X        end calibration: close all valves, park tray");
         Serial.println(" Other:");
         Serial.println("  ? position   < > jog tray   P pump station   B test job   C cancel");
         Serial.println("  T tare   S weight   A absolute weight   , . scale factor");
@@ -447,6 +510,9 @@ void handleBleRequests() {
       // Never touch the Dispatcher's steps while a job is running or the tray
       // is still parking after a cancel: it is iterating over them.
       if (dispatcher->isServing() || !transport->isParked()) {
+        if (calibrationTrayActive) {
+          endCalibrationSession(); // App forgot TX: close valves and park so the next try works.
+        }
         rejectJob(stepCount, "Busy, try again");
         return;
       }
@@ -527,7 +593,7 @@ void handleTrimRequest(const std::string& request) {
   }
 
   if (request == "TX") {
-    dispenser->setAllValves(Valve::Position::CLOSED);
+    endCalibrationSession();
     sendTrimReply("TX=ok");
     return;
   }
@@ -543,7 +609,8 @@ void handleTrimRequest(const std::string& request) {
     sendTrimReply("TE=bad");
     return;
   }
-  if (valveId < 1 || valveId > dispenser->getValveCount()) {
+  long minId = (command == 'M') ? 0 : 1; // TM0 = park
+  if (valveId < minId || valveId > dispenser->getValveCount()) {
     sendTrimReply("TE=valve");
     return;
   }
@@ -568,9 +635,21 @@ void handleTrimRequest(const std::string& request) {
 
   bool ok = true;
   switch (command) {
+    case 'M': {
+      if (hasAngle) { sendTrimReply("TE=bad"); return; }
+      const char* error = checkCalibrationTrayMove();
+      if (error != nullptr) { sendTrimReply(std::string("TE=") + error); return; }
+      moveTrayForCalibration(valveId, true);
+      sendTrimReply("TM" + std::to_string(valveId) + "=moving");
+      return; // "TM<id>=at" follows on arrival (checkCalibrationTrayArrival).
+    }
     case 'O':
     case 'C': {
       Valve::Position position = (command == 'O') ? Valve::Position::OPEN : Valve::Position::CLOSED;
+      if (position == Valve::Position::OPEN) {
+        const char* error = checkValveOpenAllowed(valveId);
+        if (error != nullptr) { sendTrimReply(std::string("TE=") + error); return; }
+      }
       if (hasAngle) {
         ok = dispenser->setValveAngle(valveId, position, angle);
       } else {
@@ -592,6 +671,61 @@ void handleTrimRequest(const std::string& request) {
   }
 
   sendTrimReply(ok ? dispenser->valveTrimStatus(valveId) : "TE=bad");
+}
+
+const char* checkCalibrationTrayMove() {
+  if (!machineIsBooted || transport->getState() == Transport::MachineState::HOMING) {
+    return "busy"; // Not homed yet.
+  }
+  Dispatcher::DispatcherState state = dispatcher->getState();
+  if (state != Dispatcher::DispatcherState::NO_CUP && state != Dispatcher::DispatcherState::READY) {
+    return "busy"; // Pouring, parking after a job, or a finished drink waiting on the tray.
+  }
+  return nullptr;
+}
+
+void moveTrayForCalibration(uint8_t station, bool fromBle) {
+  // Never drag an open valve's stream along the rail.
+  dispenser->setAllValves(Valve::Position::CLOSED);
+  transport->goToStation(station);
+  calibrationTrayActive = (station != 0);
+  calibrationTrayTarget = station;
+  calibrationTrayNotifyBle = fromBle;
+  Serial.println("[Calibration] Moving tray to station " + String(station));
+}
+
+// Opening a valve pours its bottle, so the tray must be parked under it.
+const char* checkValveOpenAllowed(uint8_t valveId) {
+  if (transport->getState() == Transport::MachineState::MOVING_TO_TARGET_POS) {
+    return "moving";
+  }
+  if (!transport->isAtTarget() || transport->getCurrentStationIndex() != valveId) {
+    return "tray"; // Valve id n sits at rail station n.
+  }
+  return nullptr;
+}
+
+void endCalibrationSession() {
+  dispenser->setAllValves(Valve::Position::CLOSED);
+  if (calibrationTrayActive && !dispatcher->isServing()) {
+    Serial.println("[Calibration] Session ended. Parking tray.");
+    transport->goPark();
+  }
+  calibrationTrayActive = false;
+  calibrationTrayTarget = -1;
+}
+
+void checkCalibrationTrayArrival() {
+  if (calibrationTrayTarget < 0 || !transport->isAtTarget()) {
+    return;
+  }
+  if (transport->getCurrentStationIndex() == calibrationTrayTarget) {
+    Serial.println("[Calibration] Tray at station " + String(calibrationTrayTarget));
+    if (calibrationTrayNotifyBle) {
+      sendTrimReply("TM" + std::to_string(calibrationTrayTarget) + "=at");
+    }
+  }
+  calibrationTrayTarget = -1; // Arrived, or something else moved the tray: stop waiting.
 }
 
 std::string statusTextForState() {

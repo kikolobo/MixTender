@@ -47,6 +47,7 @@ public:
     void goPark(uint16_t speed = 500);
     bool isParked();
     bool isAtTarget();
+    int8_t getCurrentStationIndex(); // Last station requested (0 = park), -1 before the first move.
     bool isReady();
     MachineState getState();
 

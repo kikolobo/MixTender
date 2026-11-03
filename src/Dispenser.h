@@ -57,6 +57,8 @@ public:
     bool saveValveTrim(uint8_t valveId);
     bool resetValveTrim(uint8_t valveId);   // back to defaults, not saved
     std::string valveTrimStatus(uint8_t valveId);
+    uint8_t getSelectedTrimValveId();                    // 1-based, 0 = none selected
+    Valve::Position getValvePosition(uint8_t valveId);   // 1-based; CLOSED if invalid
     std::unique_ptr<HX711> scale_;
     
 

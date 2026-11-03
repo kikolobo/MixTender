@@ -2,9 +2,9 @@
 
 | | |
 |---|---|
-| **Protocol version** | **2** |
+| **Protocol version** | **3** |
 | **Date** | 2026-11-03 |
-| **Firmware** | `kikolobo/MixTender`, branch `firmware-safety-and-calibration` (commit `51b3950`) |
+| **Firmware** | `kikolobo/MixTender`, branch `firmware-safety-and-calibration` |
 | **App** | `kikolobo/mixtender_app` (MixBot) |
 
 This file exists in **both** repos and the two copies must be identical:
@@ -177,7 +177,8 @@ job starts.
 
 ## A.6 Disconnect
 
-- If the app disconnects during **calibration**, the robot closes all valves.
+- If the app disconnects during **calibration**, the robot closes all valves and parks the
+  tray if calibration moved it.
 - A running **job continues** if the app disconnects. (Aborting a job on disconnect is planned.)
 
 ## A.7 Valve calibration `T`
@@ -186,16 +187,21 @@ Calibrates the open and closed servo angles of valve stations **1–6**. Pumps h
 calibration. Angles are degrees, **0–180**. Factory defaults: **open 147, closed 50**.
 A calibration saved in flash survives reboot; until a valve is saved it uses the defaults.
 
+**Opening a valve requires the tray under it** (since v3). Valve `<id>` sits at rail
+station `<id>`. Move the tray there with `TM<id>` and wait for `TM<id>=at` before
+`TO<id>`, so calibration pours into the cup and not onto the machine.
+
 | Command | Effect | Reply |
 |---------|--------|-------|
 | `T?` | List all valves | `T1=…` … `T6=…`, 6 notifications in order |
-| `TO<id>` | Move valve to its OPEN angle (**pours that bottle**) | `T<id>=…` |
+| `TM<id>` | Close all valves, then move the tray under valve `<id>` (1–6). `TM0` = park | `TM<id>=moving` at once, then `TM<id>=at` on arrival |
+| `TO<id>` | Move valve to its OPEN angle (**pours that bottle**). Tray must be under it | `T<id>=…` |
 | `TC<id>` | Move valve to its CLOSED angle | `T<id>=…` |
-| `TO<id>=<deg>` | Set OPEN angle (integer 0–180) and move there | `T<id>=…` |
+| `TO<id>=<deg>` | Set OPEN angle (integer 0–180) and move there. Tray must be under it | `T<id>=…` |
 | `TC<id>=<deg>` | Set CLOSED angle and move there | `T<id>=…` |
 | `TW<id>` | Save this valve's open + closed angles to flash | `T<id>=…` |
 | `TR<id>` | Reset to defaults in memory (not saved) and move | `T<id>=…` |
-| `TX` | Close all valves (end of calibration) | `TX=ok` |
+| `TX` | End calibration: close all valves, park the tray if `TM` moved it | `TX=ok` |
 
 Reply line:
 ```
@@ -205,16 +211,38 @@ e.g. T3=150,47,147,50,1
 `<saved>` = 1 if this valve has a calibration in flash. It does **not** mean the current
 angles equal the saved ones: changes are live but unsaved until `TW`.
 
-Errors: `TE=busy` (a job is running; everything except `T?` is refused), `TE=valve`
-(id not 1–6), `TE=angle` (outside 0–180), `TE=bad` (malformed), `TE=flash` (save failed).
+Errors:
+
+| Code | Meaning |
+|------|---------|
+| `busy` | A job is running (everything except `T?` is refused). For `TM` also: not homed yet, or a finished drink is waiting to be removed |
+| `tray` | `TO` refused: the tray is not under that valve. Send `TM<id>` first |
+| `moving` | `TO` refused: the tray is still moving. Wait for `TM<id>=at` |
+| `valve` | Id out of range (1–6; 0–6 for `TM`) |
+| `angle` | Angle outside 0–180 |
+| `bad` | Malformed command |
+| `flash` | Save failed |
+
+Closing (`TC`), setting the closed angle, saving, reset and `T?` work wherever the tray is.
+
+**Calibration session.** A `TM` (to 1–6) starts a session with the tray away from park.
+While it is away, a `D:` job is rejected with `Busy, try again`. That rejection also ends the
+session (closes valves and parks), so a retry a few seconds later works. `TX`, `TM0`, or a BLE
+disconnect also end it.
 
 Calibration replies are **always** sent, even if identical to the previous message.
 Firmware without calibration (protocol v1) sends no reply: treat "no reply to `T?`
 within ~1.5 s" as "not supported".
 
-**Safety rules for any UI:** warn before the first `TO` (opening a valve pours wherever the
-tray is). Always send `TX` when leaving the calibration screen. Disable calibration during
-a pour. Throttle angle changes to ≤ 5/s.
+**Calibration flow for any UI:**
+1. `TM<id>` → wait for `TM<id>=at` (a few seconds; show "moving").
+2. `TO<id>` (and `TO<id>=<deg>` adjustments) → `TC<id>` (and `TC<id>=<deg>`) → `TW<id>` to save.
+3. Next valve: `TM<next>` (closes all valves, moves).
+4. Leaving the screen: **always `TX`** (closes valves, parks).
+
+Safety rules: tell the user to put a glass on the tray before the first open. Disable
+calibration during a pour. Throttle angle changes to ≤ 5/s. On `TE=tray` or `TE=moving`, send
+`TM<id>` or wait for `=at`. Don't retry `TO` blindly.
 
 The USB console ([B.3](#b3-valve-calibration)) edits the **same** stored calibration.
 
@@ -253,21 +281,25 @@ The USB console ([B.3](#b3-valve-calibration)) edits the **same** stored calibra
 ## B.3 Valve calibration
 
 Blocked while a job is running (prints `[Trim] Ignored: a drink is being poured.`).
+Same safety as BLE: **opening needs the tray under the valve**.
 
 | Key | Action |
 |-----|--------|
-| `1`–`6` | Select valve 1–6 and move it OPEN (**pours that bottle**) |
+| `G` then `0`–`6` | Close all valves and move the tray under valve 1–6 (`G0` = park) |
+| `1`–`6` | Select valve 1–6 and move it OPEN (**pours**). Refused unless the tray is under it |
 | `q` `w` `e` `r` `t` `y` | Select valve 1–6 and move it CLOSED |
-| `+` / `-` | Move the selected valve's current position by ±1° |
+| `+` / `-` | Move the selected valve's current position by ±1° (if it's open, the tray must be under it) |
 | `@` | Reset the selected valve to defaults (147/50), not saved |
 | `!` | Save the selected valve's open + closed angles to flash |
 | `V` | List all valves |
+| `X` | End calibration: close all valves, park the tray if `G` moved it |
 
 Every change prints:
 ```
 [Trim] Valve 1: open 149 (trim 2), closed 47 (trim -3) [saved] <- selected
 ```
-Workflow: `1` → `+`/`-` until fully open → `q` → `+`/`-` until it seals → `!`.
+Workflow: glass on the tray → `G1` → `1` → `+`/`-` until fully open → `q` → `+`/`-` until it
+seals → `!` → `G2` … → `X` when done.
 
 Storage: NVS namespace `valvetrim`, keys `v<index>o` / `v<index>c` (0-based index),
 holding the **trim** (offset from the default angle), not the absolute angle.
@@ -275,6 +307,17 @@ holding the **trim** (offset from the default angle), not the absolute angle.
 ---
 
 # Changelog
+
+## v3 — 2026-11-03
+BLE (backward compatible with v2 apps, except that `TO` now needs the tray under the valve):
+- New `TM<id>`: close all valves and move the tray under valve `<id>` (`TM0` = park). Replies
+  `TM<id>=moving`, then `TM<id>=at`.
+- `TO<id>` / `TO<id>=<deg>` are refused with `TE=tray` / `TE=moving` unless the tray is
+  under that valve.
+- `TX` and BLE disconnect also park the tray. A `D:` during a session is rejected and ends it.
+
+USB:
+- New `G<0-6>` (move tray) and `X` (end calibration). Opening a valve needs the tray under it.
 
 ## v2 — 2026-11-03
 BLE (backward compatible with v1 apps):

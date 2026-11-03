@@ -176,6 +176,10 @@ void Transport::awaiting_target_pos() {
   }
 }
 
+int8_t Transport::getCurrentStationIndex() {
+  return currentStationIndex_;
+}
+
 bool Transport::isParked() {
   if (machineState_ == Transport::MachineState::AT_TARGET && currentStationIndex_ == 0) {
     return true;
