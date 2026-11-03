@@ -1,4 +1,8 @@
 #include "Dispenser.h"
+#include <Preferences.h>
+
+// Valve trims are stored in NVS (flash) under this namespace, keys "v<idx>o" / "v<idx>c".
+static const char* TRIM_NVS_NAMESPACE = "valvetrim";
 
 
 
@@ -10,6 +14,14 @@ Dispenser::Dispenser(uint8_t dat_pin, uint8_t sck_pin, float kFactor,  float emp
     emptyWeight_ = emptyWeight;      
     valveIndex_ = 0;
     pumpIndex_ = 0;
+    pourDeviceIndex_ = 0;
+    dispenseType_ = DispenseType::VALVE;
+    state_ = DispenserState::READY;
+    targetWeight_ = 0.0;
+    latestWeight_ = 0.0;
+    filteredValue_ = 0.0;
+    awaitingClosureTimeStampMS_ = 0;
+    awaitingStabilityTimeStampMS_ = 0;
     Serial.println("[Dispenser][Constructor] Dispenser created: " + String(scale_->get_units(1)));
 };
 
@@ -46,7 +58,8 @@ void Dispenser::heartbeat() {
 
     if (state_ == DispenserState::AWAITING_STABILITY) {
         if (millis() - awaitingStabilityTimeStampMS_ > 500) {
-            state_ = DispenserState::STABLE;            
+            tare(); // Tare only once the tray has settled after moving.
+            state_ = DispenserState::STABLE;
         }
     }
 
@@ -71,54 +84,168 @@ void Dispenser::heartbeat() {
 void Dispenser::tare() {
     Serial.println("[Dispenser][tare] Scale Tared.");
     scale_->tare();
+    // Drop the pre-tare history from the low-pass filter, otherwise the old
+    // reading decays into the new step and can end small pours early.
+    filteredValue_ = 0.0;
+    latestWeight_ = 0.0;
 };
 
 
 void Dispenser::selectValveForTrim(uint32_t valveId, Valve::Position position) {
-    if (valveId > valves_.size()) {
-        Serial.println("[Dispenser][selectValveForTrim] Invalid valve Index: " + String(valveId) + " out of " + String(valves_.size()) + " valves.");
+    if (valveId < 1 || valveId > valves_.size()) {
+        Serial.println("[Dispenser][selectValveForTrim] Invalid valve: " + String(valveId) + " (1.." + String(valves_.size()) + ")");
         return;
     }
-    
 
-    valveIndex_ = valveId-1;
-
-    if (position == Valve::Position::CLOSED) {
-        valves_[valveIndex_]->trimClosed(0);
-    } else if (position == Valve::Position::OPEN) {
-        valves_[valveIndex_]->trimOpen(0);
-    }
+    trimValveIndex_ = valveId - 1;
+    // Move to the position with its current trim kept (it used to reset to 0).
+    valves_[trimValveIndex_]->setPosition(position);
+    printValveTrim_(trimValveIndex_);
 };
 
-void Dispenser::beginDispensingPump(uint8_t pumpIndex, float targetWeight) {
-    if (pumpIndex > pumps_.size()) {
-        Serial.println("[Dispenser][beginDispensing] Invalid pump Index: " + String(pumpIndex) + " out of " + String(pumps_.size()-1) + " pumps.");
+void Dispenser::printValveTrim_(uint8_t index) {
+    const auto& v = valves_[index];
+    bool saved = isValveTrimSaved_(index);
+    Serial.println("[Trim] Valve " + String(index + 1) + ": open " + String(v->getOpenAngle()) + " (trim " + String(v->getOpenPositionTrim()) + ")"
+                   + ", closed " + String(v->getClosedAngle()) + " (trim " + String(v->getClosedPositionTrim()) + ")"
+                   + (saved ? " [saved]" : " [defaults]")
+                   + ((int)index == trimValveIndex_ ? " <- selected" : ""));
+}
+
+void Dispenser::printValveTrims() {
+    for (uint8_t i = 0; i < valves_.size(); i++) {
+        printValveTrim_(i);
+    }
+}
+
+void Dispenser::loadValveTrims() {
+    Preferences prefs;
+    if (!prefs.begin(TRIM_NVS_NAMESPACE, true)) {
+        Serial.println("[Trim] No saved trims. Using defaults.");
         return;
+    }
+    for (uint8_t i = 0; i < valves_.size(); i++) {
+        String o = "v" + String(i) + "o";
+        String c = "v" + String(i) + "c";
+        if (prefs.isKey(o.c_str()) && prefs.isKey(c.c_str())) {
+            valves_[i]->setTrims(prefs.getInt(o.c_str(), 0), prefs.getInt(c.c_str(), 0));
+            valves_[i]->setPosition(Valve::Position::CLOSED); // Apply the calibrated closed angle now.
+        }
+    }
+    prefs.end();
+    printValveTrims();
+}
+
+bool Dispenser::saveSelectedValveTrim() {
+    if (trimValveIndex_ < 0) {
+        Serial.println("[Trim] No valve selected. Press 1-6 or q-y first.");
+        return false;
+    }
+    return saveValveTrim(trimValveIndex_ + 1);
+}
+
+bool Dispenser::isValveTrimSaved_(uint8_t index) {
+    bool saved = false;
+    Preferences prefs;
+    if (prefs.begin(TRIM_NVS_NAMESPACE, true)) {
+        saved = prefs.isKey(("v" + String(index) + "o").c_str());
+        prefs.end();
+    }
+    return saved;
+}
+
+uint8_t Dispenser::getValveCount() {
+    return valves_.size();
+}
+
+bool Dispenser::isValidValveId_(uint8_t valveId) {
+    return valveId >= 1 && valveId <= valves_.size();
+}
+
+bool Dispenser::setValveAngle(uint8_t valveId, Valve::Position position, int32_t angle) {
+    if (!isValidValveId_(valveId) || angle < 0 || angle > 180) {
+        return false;
+    }
+    trimValveIndex_ = valveId - 1;
+    const auto& v = valves_[trimValveIndex_];
+    if (position == Valve::Position::OPEN) {
+        v->trimOpen(angle - (int32_t)v->getOpenPosition());     // also moves it open
+    } else {
+        v->trimClosed(angle - (int32_t)v->getClosedPosition()); // also moves it closed
+    }
+    printValveTrim_(trimValveIndex_);
+    return true;
+}
+
+bool Dispenser::saveValveTrim(uint8_t valveId) {
+    if (!isValidValveId_(valveId)) {
+        return false;
+    }
+    uint8_t index = valveId - 1;
+    Preferences prefs;
+    if (!prefs.begin(TRIM_NVS_NAMESPACE, false)) {
+        Serial.println("[Trim] ERROR: could not open flash storage.");
+        return false;
+    }
+    const auto& v = valves_[index];
+    bool ok = prefs.putInt(("v" + String(index) + "o").c_str(), v->getOpenPositionTrim()) > 0
+           && prefs.putInt(("v" + String(index) + "c").c_str(), v->getClosedPositionTrim()) > 0;
+    prefs.end();
+    Serial.print(ok ? "[Trim] Saved. " : "[Trim] ERROR: save failed. ");
+    printValveTrim_(index);
+    return ok;
+}
+
+bool Dispenser::resetValveTrim(uint8_t valveId) {
+    if (!isValidValveId_(valveId)) {
+        return false;
+    }
+    trimValveIndex_ = valveId - 1;
+    resetTrimPositions();
+    return true;
+}
+
+// Calibration status line for the BLE protocol:
+// T<id>=<openAngle>,<closedAngle>,<defaultOpen>,<defaultClosed>,<saved 0|1>
+std::string Dispenser::valveTrimStatus(uint8_t valveId) {
+    if (!isValidValveId_(valveId)) {
+        return "";
+    }
+    const auto& v = valves_[valveId - 1];
+    return "T" + std::to_string(valveId) + "=" + std::to_string(v->getOpenAngle()) + ","
+         + std::to_string(v->getClosedAngle()) + "," + std::to_string(v->getOpenPosition()) + ","
+         + std::to_string(v->getClosedPosition()) + "," + (isValveTrimSaved_(valveId - 1) ? "1" : "0");
+}
+
+bool Dispenser::beginDispensingPump(uint8_t pumpIndex, float targetWeight) {
+    if (pumpIndex >= pumps_.size()) {
+        Serial.println("[Dispenser][beginDispensing] Invalid pump Index: " + String(pumpIndex) + " out of " + String(pumps_.size()) + " pumps.");
+        return false;
     }
 
     dispenseType_ = DispenseType::PUMP;
     state_ = DispenserState::AWAITING_STABILITY;
-    tare();
     Serial.println("[Dispenser][beginDispensing] Beginning dispensing on pump IDX: " + String(pumpIndex));    
     targetWeight_ = targetWeight;
     awaitingStabilityTimeStampMS_ = millis();
 
     pourDeviceIndex_ = pumpIndex;
+    return true;
 };
 
-void Dispenser::beginDispensingValve(uint8_t valveIndex, float targetWeight) {   
-    if (valveIndex > valves_.size()) {
-        Serial.println("[Dispenser][beginDispensing] Invalid valve Index: " + String(valveIndex) + " out of " + String(valves_.size()-1) + " valves.");
-        return;
-    } 
+bool Dispenser::beginDispensingValve(uint8_t valveIndex, float targetWeight) {
+    if (valveIndex >= valves_.size()) {
+        Serial.println("[Dispenser][beginDispensing] Invalid valve Index: " + String(valveIndex) + " out of " + String(valves_.size()) + " valves.");
+        return false;
+    }
 
     dispenseType_ = DispenseType::VALVE;
     state_ = DispenserState::AWAITING_STABILITY;
-    tare();
     Serial.println("[Dispenser][beginDispensing] Beginning dispensing on valve IDX: " + String(valveIndex));    
     targetWeight_ = targetWeight;
     awaitingStabilityTimeStampMS_ = millis();
     pourDeviceIndex_ = valveIndex;
+    return true;
 };
 
 // void Dispenser::beginDispensing(uint8_t valveOrPumpIndex, float targetWeight, DispenseType type) {
@@ -147,7 +274,11 @@ void Dispenser::beginDispensingValve(uint8_t valveIndex, float targetWeight) {
 
 void Dispenser::abortDispensing() {    
     Serial.println("[Dispenser][abortDispensing] Aborting dispensing.");
-    
+
+    if (state_ == DispenserState::READY || state_ == DispenserState::FINISHED) {
+        return; // Nothing in progress, no output to switch off.
+    }
+
     if (dispenseType_ == DispenseType::PUMP) {
         pumps_[pourDeviceIndex_]->off();
     } else {
@@ -169,6 +300,10 @@ void Dispenser::finishDispensing_() {
     state_ = DispenserState::AWAITING_CLOSURE;
     awaitingClosureTimeStampMS_ = millis();
 };
+
+bool Dispenser::isPouring() {
+    return state_ == DispenserState::DISPENSING || state_ == DispenserState::AWAITING_CLOSURE;
+}
 
 Dispenser::DispenserState Dispenser::getState() {
     return state_;
@@ -210,37 +345,37 @@ void Dispenser::setAllValves(Valve::Position position) {
     }    
 };
 
-void Dispenser::trimValve(int value) {        
-    const auto& valvePtr = valves_[valveIndex_];
-
-    if (valvePtr == nullptr) {
-        Serial.println("[Dispenser][trimValve] Valve Index: " + String(valveIndex_) + " is null.");
+void Dispenser::trimValve(int value) {
+    if (trimValveIndex_ < 0) {
+        Serial.println("[Trim] No valve selected. Press 1-6 or q-y first.");
         return;
     }
+    const auto& valvePtr = valves_[trimValveIndex_];
 
     Valve::Position position = valvePtr->getPosition();
         
 
     if (position == Valve::Position::CLOSED) {
         valvePtr->trimClosed(valvePtr->getClosedPositionTrim() + value);
-        return;
     } else if (position == Valve::Position::OPEN) {
         valvePtr->trimOpen(valvePtr->getOpenPositionTrim() + value);
-        return;
     }
-    
+    printValveTrim_(trimValveIndex_);
+
 };
 
 void Dispenser::resetTrimPositions() {
-    if (valves_.size() == 0 || valveIndex_ > valves_.size()-1) {
-        Serial.println("[Dispenser][resetTrimPositions] No valves registered or selected.");
+    if (trimValveIndex_ < 0) {
+        Serial.println("[Trim] No valve selected. Press 1-6 or q-y first.");
         return;
     }
 
-
-    const auto& valvePtr = valves_[valveIndex_];
+    const auto& valvePtr = valves_[trimValveIndex_];
     valvePtr->resetTrimPositions();
-         
+    valvePtr->setPosition(valvePtr->getPosition()); // Move to the default angle so the change is visible.
+    Serial.print("[Trim] Reset to defaults (not saved, press ! to save). ");
+    printValveTrim_(trimValveIndex_);
+
 };
 
 uint8_t Dispenser::registerValve(std::shared_ptr<Valve> valve) {    

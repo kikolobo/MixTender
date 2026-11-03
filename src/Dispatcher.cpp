@@ -45,12 +45,23 @@ void Dispatcher::movingPhase_() {
         state_ = DispatcherState::SERVING;
         steps_[currentStep_].beginDispensingTimeStampMS = millis();
 
+        bool started;
         if (steps_[currentStep_].type == Dispenser::DispenseType::PUMP) {
-            dispenser_->beginDispensingPump(steps_[currentStep_].pourDeviceIndex, steps_[currentStep_].targetWeight);
+            started = dispenser_->beginDispensingPump(steps_[currentStep_].pourDeviceIndex, steps_[currentStep_].targetWeight);
         } else {
-            dispenser_->beginDispensingValve(steps_[currentStep_].pourDeviceIndex, steps_[currentStep_].targetWeight);
+            started = dispenser_->beginDispensingValve(steps_[currentStep_].pourDeviceIndex, steps_[currentStep_].targetWeight);
         }
-    }    
+
+        if (!started) {
+            // Unknown pour device: fail this step instead of hanging or
+            // reporting it complete with nothing poured.
+            Serial.println("[Dispatcher][movingPhase_] Could not start step " + String(currentStep_) + ". Marking failed.");
+            if (didFailDispensingCallback_) {
+                didFailDispensingCallback_(currentStep_);
+            }
+            advanceStep_();
+        }
+    }
 }
 
 void Dispatcher::servingPhase_() {
@@ -60,10 +71,12 @@ void Dispatcher::servingPhase_() {
         steps_[currentStep_].endDispensingTimeStampMS = millis();
     }
 
-    if (didUpdateWeightCallback_) {
+    // Only report weight while this step's output is open or settling. Before
+    // that, the reading still holds the pre-tare weight (cup or previous step).
+    if (didUpdateWeightCallback_ && dispenser_->isPouring()) {
             didUpdateWeightCallback_(currentStep_, dispenser_->getLatestWeight());
     }
-    
+
 }
 
 void Dispatcher::awaitingEndDelayPhase_() {
@@ -74,17 +87,21 @@ void Dispatcher::awaitingEndDelayPhase_() {
          if (didFinishDispensingCallback_) {
             didFinishDispensingCallback_(currentStep_);
         }
-        currentStep_++;
-        if (currentStep_ >= steps_.size()) {
-            Serial.println("[Dispatcher][awaitingDelayPhase_] All steps complete.");            
-            state_ = DispatcherState::AWAITING_REMOVAL;            
-            transport_->goPark(); 
-            if (didFinishJobCallback_) {
-                didFinishJobCallback_();
-            }           
-        }  else {
-           performNextStep_();
+        advanceStep_();
+    }
+}
+
+void Dispatcher::advanceStep_() {
+    currentStep_++;
+    if (currentStep_ >= steps_.size()) {
+        Serial.println("[Dispatcher][advanceStep_] All steps complete.");
+        state_ = DispatcherState::AWAITING_REMOVAL;
+        transport_->goPark();
+        if (didFinishJobCallback_) {
+            didFinishJobCallback_();
         }
+    } else {
+        performNextStep_();
     }
 }
 
@@ -109,11 +126,17 @@ void Dispatcher::jobCompletePhase_() {
 }
 
 
-void Dispatcher::cancel() {
+bool Dispatcher::cancel() {
+    if (!isServing()) {
+        // Nothing to cancel. Parking here would also interrupt homing.
+        Serial.println("[Dispatcher][cancel] No job in progress. Ignoring.");
+        return false;
+    }
     Serial.println("[Dispatcher][cancel] Cancelling job.");
     dispenser_->abortDispensing();
     transport_->goPark();
-    state_ = DispatcherState::JOB_COMPLETE;    
+    state_ = DispatcherState::JOB_COMPLETE;
+    return true;
 }
 
 void Dispatcher::reset_() {
@@ -126,13 +149,22 @@ void Dispatcher::reset_() {
 }
 
 void Dispatcher::performNextStep_() {
-        Serial.println("[Dispatcher][performNextStep_] Performing next step: " + String(currentStep_) + " of " + String(steps_.size()-1));
-        transport_->goToStation(steps_[currentStep_].stationIndex);
-        steps_[currentStep_].beginMovementTimeStampMS = millis();        
-        state_ = DispatcherState::MOVING;
+        Serial.println("[Dispatcher][performNextStep_] Performing step: " + String(currentStep_) + " of " + String(steps_.size()-1));
         if (willBeginDispensingCallback_) {
             willBeginDispensingCallback_(currentStep_);
         }
+
+        if (steps_[currentStep_].targetWeight <= 0.0) {
+            // 0 ml ingredient: nothing to pour, but the app still needs S<n>=C.
+            Serial.println("[Dispatcher][performNextStep_] Zero amount. Skipping pour.");
+            steps_[currentStep_].endDispensingTimeStampMS = millis();
+            state_ = DispatcherState::AWAITING_END_DELAY;
+            return;
+        }
+
+        transport_->goToStation(steps_[currentStep_].stationIndex);
+        steps_[currentStep_].beginMovementTimeStampMS = millis();
+        state_ = DispatcherState::MOVING;
 }
 
 void Dispatcher::clearSteps() {
@@ -159,7 +191,17 @@ bool Dispatcher::start() {
     if (transport_->isParked() == false) {
         Serial.println("[Dispatcher][start] Transport not ready.");
         return false;
-    }    
+    }
+
+    if (state_ != DispatcherState::READY) {
+        // Only start on an empty cup that was just placed: never pour into a
+        // finished drink still waiting to be removed.
+        Serial.println("[Dispatcher][start] Not READY (cup missing or drink not removed).");
+        return false;
+    }
+
+    // A valve may have been left open by calibration (serial or BLE).
+    dispenser_->setAllValves(Valve::Position::CLOSED);
 
     currentStep_ = 0;
     cumulativeWeight_ = 0.0;
@@ -167,11 +209,8 @@ bool Dispatcher::start() {
     
     Serial.println("[Dispatcher][start] Performing first step: " + String(currentStep_) + " of " + String(steps_.size()-1));
     Serial.println("[Dispatcher][start] Start weight: " + String(dispenser_->getLatestWeight()) + "g");
-    
-    transport_->goToStation(steps_[currentStep_].stationIndex);
-    steps_[currentStep_].beginMovementTimeStampMS = millis();
-    state_ = DispatcherState::MOVING;
 
+    performNextStep_();
     return true;
 }
 
@@ -209,6 +248,10 @@ void Dispatcher::setWillBeginDispensingCallback(WillBeginDispensing callback) {
 
 void Dispatcher::setDidFinishDispensingCallback(DidFinishDispensing callback) {
     didFinishDispensingCallback_ = callback;
+}
+
+void Dispatcher::setDidFailDispensingCallback(DidFailDispensing callback) {
+    didFailDispensingCallback_ = callback;
 }
 
 void Dispatcher::setDidUpdateWeight(DidUpdateWeight callback) {

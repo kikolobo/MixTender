@@ -30,22 +30,40 @@ void Valve::writeValue(uint32_t value) {
     servo_.write(value);
 }
 
-void Valve::trimOpen(uint32_t value) {
-    openPositionTrim_ = value;
+// Keep base + trim inside the servo's 0..180 range.
+int32_t Valve::clampTrim_(uint32_t base, int32_t trim) {
+    return constrain(trim, -(int32_t)base, 180 - (int32_t)base);
+}
+
+void Valve::trimOpen(int32_t value) {
+    openPositionTrim_ = clampTrim_(openPosition_, value);
     setPosition(Position::OPEN);
 }
 
-void Valve::trimClosed(uint32_t value) {
-   closedPositionTrim_ = value;
+void Valve::trimClosed(int32_t value) {
+   closedPositionTrim_ = clampTrim_(closedPosition_, value);
    setPosition(Position::CLOSED);
 }
 
-uint32_t Valve::getOpenPositionTrim() {
+void Valve::setTrims(int32_t openTrim, int32_t closedTrim) {
+    openPositionTrim_ = clampTrim_(openPosition_, openTrim);
+    closedPositionTrim_ = clampTrim_(closedPosition_, closedTrim);
+}
+
+int32_t Valve::getOpenPositionTrim() {
     return openPositionTrim_;
 }
 
-uint32_t Valve::getClosedPositionTrim() {
+int32_t Valve::getClosedPositionTrim() {
     return closedPositionTrim_;
+}
+
+uint32_t Valve::getOpenAngle() {
+    return openPosition_ + openPositionTrim_;
+}
+
+uint32_t Valve::getClosedAngle() {
+    return closedPosition_ + closedPositionTrim_;
 }
 
 void Valve::resetTrimPositions() {
@@ -58,7 +76,7 @@ void Valve::resetTrimPositions() {
 void Valve::setPosition(Position position) {
     // position_ = position == Position::CLOSED ? 0 : 1;
     position_ = position;
-    currentPosition_ = (position_ == Position::CLOSED) ? (closedPosition_ + closedPositionTrim_) : (openPosition_ + openPositionTrim_);
+    currentPosition_ = (position_ == Position::CLOSED) ? getClosedAngle() : getOpenAngle();
     servo_.write(currentPosition_);
     Serial.print("[Valve][setPosition] Setting valve position to: ");
     Serial.print(position_ == Position::CLOSED ? "CLOSED" : "OPEN");

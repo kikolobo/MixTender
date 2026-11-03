@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Arduino.h"
+#include <atomic>
 #include <BLEDevice.h>
 #include <BLEUtils.h>
 #include <BLEServer.h>
@@ -27,11 +28,13 @@ public:
     void startAdvertising();
     void stopAdvertising();
     
-    void sendData(std::string status);
+    // force = send even if identical to the previous message (for request/reply).
+    void sendData(std::string status, bool force = false);
     void notifyStatus(std::string status);
     void notifyCupStatus(bool status);
     void notifyStateIsProcessing(uint8_t step);
     void notifyStateIsComplete(uint8_t step);
+    void notifyStateIsFailed(uint8_t step);
     void notifyWeightUpdate(uint8_t step, double weight);
 
     void heartbeat();
@@ -45,9 +48,11 @@ private:
     BLECharacteristic *characteristicStatus;
     
     BLEServer *server;
-    bool isConnected = false;
-    bool isAdvertising = false;
-    std::string sentData = "";
+    // Written from the BLE task, read from loop().
+    std::atomic<bool> isConnected{false};
+    std::atomic<bool> isAdvertising{false};
+    std::atomic<bool> resetSentData_{false};
+    std::string sentData = ""; // loop() only
 
     void setConnected(bool connected);
     void setAdvertising(bool advertising);

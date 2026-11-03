@@ -1,6 +1,9 @@
 #include <iostream>
 #include <vector>
 #include <cstring>
+#include <atomic>
+#include <deque>
+#include <mutex>
 #include <Arduino.h>
 
 #include "SPI.h"
@@ -33,7 +36,16 @@
 #define CH3_PIN 27
 #define LC_SCK 12 
 #define SERVO4_PIN LED_BUILTIN  //13
-const float calibration_factor = 439; 
+const float calibration_factor = 439;
+
+// Job limits enforced on every BLE "D:" request.
+const uint8_t NUM_VALVE_STATIONS = 6;   // ids 1..6 -> valves 1..6 at stations 1..6
+const uint8_t NUM_PUMPS = 3;            // ids 7..9 -> pumps 1..3, all at station 7
+const uint8_t PUMP_STATION = 7;
+const float MAX_JOB_GRAMS = 450.0;      // Glass capacity. Reject jobs above this.
+const float MAX_START_GRAMS = 400.0;    // Heaviest *empty* cup accepted. Above this the cup
+                                        // probably still holds a drink: refuse to pour.
+const size_t MAX_PENDING_BLE_REQUESTS = 8;
 
 // HX711 scale;
 uint8_t stationIdx = 0;
@@ -51,18 +63,35 @@ std::unique_ptr<LedManager> ledMan;
 BluetoothEngine *ble;
 
 
-std::string rxdData;
-bool didReceiveData = false;
-bool isConnected = false;
+// BLE writes arrive on the BLE task; loop() drains them. The mutex guards the
+// queue (std::string allocates, so it can't be shared without a lock).
+std::mutex bleRequestsMutex;
+std::deque<std::string> bleRequests;
+std::atomic<bool> isConnected(false);
 Dispatcher::DispatcherState lastState = Dispatcher::DispatcherState::UNKNOWN;
 
 void handleBleRequests();
 void handleSerialRequests();
-bool parseBleRequestToDispatcher(const std::string& rxdData);
+
+struct ParsedStep {
+  Dispenser::DispenseType type;
+  uint8_t stationID;
+  uint8_t pourDeviceID; // 1-based, as Dispatcher::addStep expects
+  float targetWeight;
+};
+// Fills `steps` with every pair it finds (stepCount = number of pairs, even if
+// some are invalid, so a rejection can fail each of them). Returns false and
+// sets `error` if any pair is invalid or the total exceeds MAX_JOB_GRAMS.
+bool parseJob(const std::string& request, std::vector<ParsedStep>& steps, size_t& stepCount, String& error);
+void rejectJob(size_t stepCount, const std::string& reason);
+std::string statusTextForState();
+void handleTrimRequest(const std::string& request);
+void sendTrimReply(const std::string& message);
 
 //Callbacks from dispatcher (prototypes)
 void willBeginDispensing(uint8_t step);
 void didFinishDispensing(uint8_t step);
+void didFailDispensing(uint8_t step);
 void didUpdateWeight(uint8_t step, float weight);
 void didFinishJob();
 void isReady();
@@ -125,6 +154,7 @@ void setup() {
   dispenser->registerValve(std::make_shared<Valve>(SERVO3_PIN));
   dispenser->registerValve(std::make_shared<Valve>(SERVO1_PIN));
   dispenser->registerValve(std::make_shared<Valve>(SERVO5_PIN));
+  dispenser->loadValveTrims(); // Saved calibration overrides the 50/147 defaults per valve.
 
   //Register Pumps
   dispenser->registerPump(std::make_shared<Pump>(CH1_PIN));
@@ -134,6 +164,7 @@ void setup() {
   Serial.println("[INITIALIZING DISPATCHER]");
   dispatcher->setWillBeginDispensingCallback(willBeginDispensing);
   dispatcher->setDidFinishDispensingCallback(didFinishDispensing);
+  dispatcher->setDidFailDispensingCallback(didFailDispensing);
   dispatcher->setDidUpdateWeight(didUpdateWeight);
   dispatcher->setDidFinishJob(didFinishJob);
   dispatcher->setIsReady(isReady);
@@ -146,9 +177,12 @@ ledMan->setAllLeds(CRGB(10,10,10));
 Serial.println("[INITIALIZING BLUETOOTH ENGINE]");
   ble = new BluetoothEngine();    
 
-  ble->setDidReceiveCallback([](std::string data) {              
-          rxdData = data;
-          didReceiveData = true;                     
+  ble->setDidReceiveCallback([](const std::string& data) {
+      std::lock_guard<std::mutex> lock(bleRequestsMutex);
+      if (bleRequests.size() >= MAX_PENDING_BLE_REQUESTS) {
+        bleRequests.pop_front(); // Drop the oldest rather than grow without bound.
+      }
+      bleRequests.push_back(data);
   });
 
   ble->setDidConnectCallback([]() {        
@@ -157,6 +191,10 @@ Serial.println("[INITIALIZING BLUETOOTH ENGINE]");
 
   ble->setDidDisconnectConnectCallback([]() {        
       isConnected = false;
+      // Don't leave a valve open if the app disconnects mid-calibration.
+      // Queued so it runs on loop(), not the BLE task (ignored while pouring).
+      std::lock_guard<std::mutex> lock(bleRequestsMutex);
+      bleRequests.push_back("TX");
   });
 
 
@@ -221,6 +259,12 @@ void updateCupState() {
 void handleSerialRequests() {
 if (Serial.available() > 0) {  // Check if data is available to read
     auto receivedChar = Serial.read(); // Read the incoming byte
+
+    // Valve calibration keys move servos: never while a job is running.
+    if (strchr("123456qwerty+-@!", receivedChar) != NULL && dispatcher->isServing()) {
+      Serial.println("[Trim] Ignored: a drink is being poured.");
+      return;
+    }
     // Serial.print((int)receivedChar);
     switch (receivedChar) {       
      case '?':
@@ -309,6 +353,25 @@ if (Serial.available() > 0) {  // Check if data is available to read
       case '@':
         dispenser->resetTrimPositions();
         break;
+      case '!':
+        dispenser->saveSelectedValveTrim();
+        break;
+      case 'V':
+        dispenser->printValveTrims();
+        break;
+      case 'h':
+        Serial.println("--- MixTender serial commands ---");
+        Serial.println(" Valve calibration (blocked while pouring):");
+        Serial.println("  1-6      select valve 1-6, move OPEN");
+        Serial.println("  q w e r t y  select valve 1-6, move CLOSED");
+        Serial.println("  + / -    nudge selected valve's current position by 1 deg");
+        Serial.println("  @        reset selected valve to defaults (50/147), not saved");
+        Serial.println("  !        save selected valve's open+closed trims to flash");
+        Serial.println("  V        list all valves: angles, trims, saved/defaults");
+        Serial.println(" Other:");
+        Serial.println("  ? position   < > jog tray   P pump station   B test job   C cancel");
+        Serial.println("  T tare   S weight   A absolute weight   , . scale factor");
+        break;
       case 'P':
         transport->goToStation(7);
         break;
@@ -340,6 +403,11 @@ void didFinishDispensing(uint8_t step) {
   Serial.println("[main][didFinishDispensingCallback] Step: " + String(step));  
 }
 
+void didFailDispensing(uint8_t step) {
+  ble->notifyStateIsFailed(step);
+  Serial.println("[main][didFailDispensingCallback] Step: " + String(step));
+}
+
 void didUpdateWeight(uint8_t step, float weight) {
   ble->notifyWeightUpdate(step, weight);  
 }
@@ -357,92 +425,257 @@ void isReady() {
 
 void handleBleRequests() {
 
-  std::string rxdData_ = rxdData;
-  if (didReceiveData == true) {
-    
-    didReceiveData = false;
-    rxdData = "";
+  std::string rxdData_;
+  {
+    std::lock_guard<std::mutex> lock(bleRequestsMutex);
+    if (bleRequests.empty()) {
+      return;
+    }
+    rxdData_ = std::move(bleRequests.front());
+    bleRequests.pop_front();
+  }
+  {
 
     Serial.println("[Main][handleBleRequests] Received: " + String(rxdData_.c_str()));
-    if (parseBleRequestToDispatcher(rxdData_) == true) {
+
+    if (rxdData_.rfind("D:", 0) == 0) {
+      std::vector<ParsedStep> steps;
+      size_t stepCount = 0;
+      String error;
+      bool valid = parseJob(rxdData_, steps, stepCount, error);
+
+      // Never touch the Dispatcher's steps while a job is running or the tray
+      // is still parking after a cancel: it is iterating over them.
+      if (dispatcher->isServing() || !transport->isParked()) {
+        rejectJob(stepCount, "Busy, try again");
+        return;
+      }
       if (dispatcher->getState() == Dispatcher::DispatcherState::NO_CUP) {
-        ble->notifyStatus("No Cup! Please add a cup!");
+        rejectJob(stepCount, "No Cup! Please add a cup!");
         ble->notifyCupStatus(false);
         return;
       }
+      if (dispatcher->getState() != Dispatcher::DispatcherState::READY) {
+        // e.g. AWAITING_REMOVAL: the finished drink is still on the tray.
+        rejectJob(stepCount, "Remove your drink first");
+        return;
+      }
+      float cupWeight = dispenser->getAbsoluteWeight();
+      if (cupWeight > MAX_START_GRAMS) {
+        Serial.println("[Main][handleBleRequests] Cup too heavy to be empty: " + String(cupWeight) + "g");
+        rejectJob(stepCount, "Cup is not empty");
+        return;
+      }
+      if (!valid) {
+        Serial.println("[Main][handleBleRequests] Rejected job: " + error);
+        rejectJob(stepCount, "Invalid drink request");
+        return;
+      }
+
+      dispatcher->clearSteps();
+      for (const auto& step : steps) {
+        dispatcher->addStep(step.type, step.stationID, step.pourDeviceID, step.targetWeight);
+      }
+      if (!dispatcher->start()) {
+        dispatcher->clearSteps();
+        rejectJob(stepCount, "Not ready, try again");
+        return;
+      }
       ble->notifyStatus("Serving your drink!");
-      dispatcher->start();
+
     } else if (rxdData_ == "C!") {
       Serial.println("[Main][handleBleRequests] Cancel Request Received");
-      dispatcher->cancel();
+      if (dispatcher->cancel()) {
+        ble->notifyStatus("Cancelled");
+      }
     } else if (rxdData_ == "ehlo") {
       Serial.println("[Main][handleBleRequests] Ping Received");
-      updateCupState();      
+      updateCupState();
+      ble->notifyStatus(statusTextForState());
+    } else if (!rxdData_.empty() && rxdData_[0] == 'T') {
+      handleTrimRequest(rxdData_);
     }  else {
       Serial.println("[Main][handleBleRequests] Unknown Request Received: " + String(rxdData_.c_str()));
-    }              
+    }
   }
-  
+
+}
+
+void sendTrimReply(const std::string& message) {
+  ble->sendData(message, true); // Always reply, even if identical to the last message.
+}
+
+// Valve calibration over BLE. See NOTES_FROM_FIRMWARE.md in the app repo.
+//   T?            list all valves -> one T<id>=... line per valve
+//   TO<id>        move valve to OPEN          TC<id>        move to CLOSED
+//   TO<id>=<deg>  set OPEN angle and move     TC<id>=<deg>  set CLOSED angle and move
+//   TW<id>        save valve's trims to flash TR<id>        reset to defaults (not saved)
+//   TX            close all valves (end of calibration) -> TX=ok
+// Replies T<id>=<open>,<closed>,<defOpen>,<defClosed>,<saved> or TE=<error>.
+void handleTrimRequest(const std::string& request) {
+  if (request == "T?") {
+    for (uint8_t id = 1; id <= dispenser->getValveCount(); id++) {
+      sendTrimReply(dispenser->valveTrimStatus(id));
+      delay(5); // Don't flood the BLE stack with back-to-back notifications.
+    }
+    return;
+  }
+
+  if (dispatcher->isServing()) {
+    sendTrimReply("TE=busy"); // Never move valves during a pour.
+    return;
+  }
+
+  if (request == "TX") {
+    dispenser->setAllValves(Valve::Position::CLOSED);
+    sendTrimReply("TX=ok");
+    return;
+  }
+
+  if (request.size() < 3) {
+    sendTrimReply("TE=bad");
+    return;
+  }
+  char command = request[1];
+  char* end;
+  long valveId = strtol(request.c_str() + 2, &end, 10);
+  if (end == request.c_str() + 2) {
+    sendTrimReply("TE=bad");
+    return;
+  }
+  if (valveId < 1 || valveId > dispenser->getValveCount()) {
+    sendTrimReply("TE=valve");
+    return;
+  }
+
+  bool hasAngle = (*end == '=');
+  long angle = 0;
+  if (hasAngle) {
+    char* angleStart = end + 1;
+    angle = strtol(angleStart, &end, 10);
+    if (end == angleStart || *end != '\0') {
+      sendTrimReply("TE=bad");
+      return;
+    }
+    if (angle < 0 || angle > 180) {
+      sendTrimReply("TE=angle");
+      return;
+    }
+  } else if (*end != '\0') {
+    sendTrimReply("TE=bad");
+    return;
+  }
+
+  bool ok = true;
+  switch (command) {
+    case 'O':
+    case 'C': {
+      Valve::Position position = (command == 'O') ? Valve::Position::OPEN : Valve::Position::CLOSED;
+      if (hasAngle) {
+        ok = dispenser->setValveAngle(valveId, position, angle);
+      } else {
+        dispenser->selectValveForTrim(valveId, position);
+      }
+      break;
+    }
+    case 'W':
+      if (hasAngle) { sendTrimReply("TE=bad"); return; }
+      if (!dispenser->saveValveTrim(valveId)) { sendTrimReply("TE=flash"); return; }
+      break;
+    case 'R':
+      if (hasAngle) { sendTrimReply("TE=bad"); return; }
+      ok = dispenser->resetValveTrim(valveId);
+      break;
+    default:
+      sendTrimReply("TE=bad");
+      return;
+  }
+
+  sendTrimReply(ok ? dispenser->valveTrimStatus(valveId) : "TE=bad");
+}
+
+std::string statusTextForState() {
+  if (!machineIsBooted) {
+    return "Starting up...";
+  }
+  switch (dispatcher->getState()) {
+    case Dispatcher::DispatcherState::NO_CUP:           return "Please add a cup";
+    case Dispatcher::DispatcherState::READY:            return "Ready!";
+    case Dispatcher::DispatcherState::AWAITING_REMOVAL: return "Get your drink!";
+    case Dispatcher::DispatcherState::JOB_COMPLETE:     return "Parking...";
+    default:                                            return "Still Working!";
+  }
+}
+
+// The app has no job-level reject message. Failing every step lets its pour
+// screen finish instead of waiting forever.
+void rejectJob(size_t stepCount, const std::string& reason) {
+  for (size_t i = 0; i < stepCount; i++) {
+    ble->notifyStateIsFailed(i);
+    delay(5); // Don't flood the BLE stack with back-to-back notifications.
+  }
+  ble->notifyStatus(reason);
 }
 
 
-bool parseBleRequestToDispatcher(const std::string& rxdData) {
-    std::vector<Dispatcher::Steps> steps;
+bool parseJob(const std::string& request, std::vector<ParsedStep>& steps, size_t& stepCount, String& error) {
+    steps.clear();
+    stepCount = 0;
+    error = "";
 
-    // Find the position of the first ':'
-    size_t pos = rxdData.find(':');
-    if (pos == std::string::npos) {
-        // std::cerr << "Invalid input string format\n";
-        return false;
-    }
-
-    // Extract the command part (before ':')
-    std::string command = rxdData.substr(0, pos);
-    if (command != "D") {     
-        return false;
-    }
-
-    // Extract the remaining part (after ':')
-    std::string stepsPart = rxdData.substr(pos + 1);
-
-    // Tokenize the stepsPart by ','
+    // Copy everything after "D:" so strtok can split it.
     char stepsCopy[256];
-    strncpy(stepsCopy, stepsPart.c_str(), sizeof(stepsCopy));
-    stepsCopy[sizeof(stepsCopy) - 1] = '\0'; // Ensure null termination
+    strncpy(stepsCopy, request.c_str() + 2, sizeof(stepsCopy));
+    stepsCopy[sizeof(stepsCopy) - 1] = '\0';
 
-    char* step = strtok(stepsCopy, ",");
-    dispatcher->clearSteps();
-    Serial.println("[main][parseBTRequestToDispatcher] --------------------------------->");
-    while (step != NULL) {
-        
-        char* equalPos = strchr(step, '=');
+    float totalWeight = 0.0;
+    Serial.println("[main][parseJob] --------------------------------->");
+    for (char* pair = strtok(stepsCopy, ","); pair != NULL; pair = strtok(NULL, ",")) {
+        stepCount++;
+        if (error.length() > 0) {
+            continue; // Already invalid: keep counting so every step can be failed.
+        }
+
+        char* equalPos = strchr(pair, '=');
         if (equalPos == NULL) {
-            Serial.println("Invalid step format");
-            return false;
+            error = "step " + String(stepCount - 1) + ": missing '='";
+            continue;
         }
-
-        // Extract StepID (index) and value
         *equalPos = '\0';
-        int addressID = atoi(step);
-        double targetWeight = atof(equalPos + 1);
-
-        uint8_t stationID = (uint8_t)addressID;
-        uint8_t pourDeviceID = stationID;
-
-        
-        Dispenser::DispenseType stationType = Dispenser::DispenseType::VALVE;
-        if (stationID >= 7) {
-            stationType = Dispenser::DispenseType::PUMP;
-            stationID = 7;
-            pourDeviceID = addressID - 6;
+        char* end;
+        long addressID = strtol(pair, &end, 10);
+        if (end == pair || *end != '\0' || addressID < 1 || addressID > NUM_VALVE_STATIONS + NUM_PUMPS) {
+            error = "step " + String(stepCount - 1) + ": unknown station '" + String(pair) + "'";
+            continue;
+        }
+        float targetWeight = strtof(equalPos + 1, &end);
+        if (end == equalPos + 1 || *end != '\0' || !isfinite(targetWeight) || targetWeight < 0.0) {
+            error = "step " + String(stepCount - 1) + ": bad amount '" + String(equalPos + 1) + "'";
+            continue;
         }
 
-        dispatcher->addStep(stationType, stationID, pourDeviceID, targetWeight);
-
-        Serial.println("[main][parseBTRequestToDispatcher] Step Added: " + String(addressID) + " = " + String(targetWeight)); 
-        step = strtok(NULL, ",");
+        ParsedStep step;
+        step.targetWeight = targetWeight;
+        if (addressID <= NUM_VALVE_STATIONS) {
+            step.type = Dispenser::DispenseType::VALVE;
+            step.stationID = (uint8_t)addressID;
+            step.pourDeviceID = (uint8_t)addressID;
+        } else {
+            step.type = Dispenser::DispenseType::PUMP;
+            step.stationID = PUMP_STATION;
+            step.pourDeviceID = (uint8_t)(addressID - NUM_VALVE_STATIONS);
+        }
+        steps.push_back(step);
+        totalWeight += targetWeight;
+        Serial.println("[main][parseJob] Step: " + String(addressID) + " = " + String(targetWeight));
     }
+    Serial.println("[main][parseJob] ---------------------------------<");
 
-    Serial.println("[main][parseBTRequestToDispatcher] ---------------------------------<");
-    return true;
+    if (error.length() == 0 && stepCount == 0) {
+        error = "no steps";
+    }
+    if (error.length() == 0 && totalWeight > MAX_JOB_GRAMS) {
+        error = "total " + String(totalWeight) + "g exceeds max " + String(MAX_JOB_GRAMS) + "g";
+    }
+    return error.length() == 0;
 }

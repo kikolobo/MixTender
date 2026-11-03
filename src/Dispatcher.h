@@ -47,6 +47,7 @@ public:
 
 using WillBeginDispensing = std::function<void(const uint8_t&)>;
 using DidFinishDispensing =  std::function<void(const uint8_t&)>;
+using DidFailDispensing =  std::function<void(const uint8_t&)>;
 using DidUpdateWeight =  std::function<void(const uint8_t&, float weight)>;
 using DidFinishJob =  std::function<void()>;
 using IsReady =  std::function<void()>;
@@ -56,11 +57,12 @@ void heartbeat();
 void clearSteps();
 void addStep(Dispenser::DispenseType type,  uint8_t stationIndex, uint8_t pourDeviceIndex, float targetWeight);
 bool start();
-void cancel();
+bool cancel(); // false if no job was in progress
 bool isServing();
 
 void setWillBeginDispensingCallback(WillBeginDispensing callback);
 void setDidFinishDispensingCallback(DidFinishDispensing callback);
+void setDidFailDispensingCallback(DidFailDispensing callback);
 void setDidUpdateWeight(DidUpdateWeight callback);
 void setDidFinishJob(DidFinishJob callback);
 void setIsReady(IsReady callback);
@@ -76,7 +78,8 @@ private:
     void awaitingStartDelayPhase_();
     void awaitingRemovalPhase_();
     void jobCompletePhase_();
-    void performNextStep_(); 
+    void performNextStep_();
+    void advanceStep_();
     void reset_();
 
     std::shared_ptr<Dispenser> dispenser_;
@@ -84,6 +87,7 @@ private:
 
     WillBeginDispensing willBeginDispensingCallback_;
     DidFinishDispensing didFinishDispensingCallback_;
+    DidFailDispensing didFailDispensingCallback_;
     DidUpdateWeight didUpdateWeightCallback_;
     DidFinishJob didFinishJobCallback_;
     IsReady isReadyCallback_;

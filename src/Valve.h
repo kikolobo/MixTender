@@ -16,12 +16,17 @@ public:
     Position getPosition();    
     void setPosition(Position position);
     void writeValue(uint32_t value);
-    void trimOpen(uint32_t value);
-    void trimClosed(uint32_t value);
+    // Trims are signed offsets (degrees) added to the base open/closed angles.
+    // trimOpen/trimClosed also move the valve there; setTrims does not move it.
+    void trimOpen(int32_t value);
+    void trimClosed(int32_t value);
+    void setTrims(int32_t openTrim, int32_t closedTrim);
     uint32_t getOpenPosition();
     uint32_t getClosedPosition();
-    uint32_t getOpenPositionTrim();
-    uint32_t getClosedPositionTrim();
+    int32_t getOpenPositionTrim();
+    int32_t getClosedPositionTrim();
+    uint32_t getOpenAngle();   // base + trim, clamped to 0..180
+    uint32_t getClosedAngle();
     void resetTrimPositions();
     
 private:
@@ -31,8 +36,9 @@ private:
     uint8_t timerChannel_;
     uint32_t closedPosition_;
     uint32_t openPosition_;
-    uint32_t openPositionTrim_;
-    uint32_t closedPositionTrim_;
+    int32_t openPositionTrim_;
+    int32_t closedPositionTrim_;
+    int32_t clampTrim_(uint32_t base, int32_t trim);
     uint32_t currentPosition_;
     uint32_t positionTimeStamp_;
 };

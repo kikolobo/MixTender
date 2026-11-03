@@ -32,26 +32,41 @@ public:
     
     // void beginDispensing(uint8_t valveOrPumpIndex, float targetWeight, DispenseType type);    
     
-    void beginDispensingPump(uint8_t pourDeviceIndex, float targetWeight);    
-    void beginDispensingValve(uint8_t pourDeviceIndex, float targetWeight);    
+    // Return false (and leave the dispenser untouched) if the index is out of range.
+    bool beginDispensingPump(uint8_t pourDeviceIndex, float targetWeight);
+    bool beginDispensingValve(uint8_t pourDeviceIndex, float targetWeight);
 
     void registerCompletionCallback(DispenseCompleteCallback callback);
     void abortDispensing();
     void heartbeat();
     void tare();
     DispenserState getState();
+    bool isPouring(); // Output open, or closing and settling: weight readings belong to this step.
     float getLatestWeight();
     float getAbsoluteWeight();
     void setAllValves(Valve::Position position);    
     void trimValve(int value);
     void resetTrimPositions();
-    void selectValveForTrim(uint32_t valveId, Valve::Position position);
+    void selectValveForTrim(uint32_t valveId, Valve::Position position); // valveId is 1-based
+    void loadValveTrims();          // Apply trims saved in flash (call after registering valves).
+    bool saveSelectedValveTrim();   // Persist the selected valve's open + closed trims.
+    void printValveTrims();
+    // Calibration by 1-based valve id (used by BLE). All return false on a bad id/angle.
+    uint8_t getValveCount();
+    bool setValveAngle(uint8_t valveId, Valve::Position position, int32_t angle); // 0..180, moves the valve
+    bool saveValveTrim(uint8_t valveId);
+    bool resetValveTrim(uint8_t valveId);   // back to defaults, not saved
+    std::string valveTrimStatus(uint8_t valveId);
     std::unique_ptr<HX711> scale_;
     
 
 private:
     void resetDispensing_(bool skipCallback = false);
     void finishDispensing_();
+    void printValveTrim_(uint8_t index);
+    bool isValveTrimSaved_(uint8_t index);
+    bool isValidValveId_(uint8_t valveId);
+    int trimValveIndex_ = -1; // Valve selected for trimming (0-based), -1 = none. Independent of pouring.
     DispenseCompleteCallback completionCallback_;
     std::vector<std::shared_ptr<Valve>> valves_;
     std::vector<std::shared_ptr<Pump>> pumps_;

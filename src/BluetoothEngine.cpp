@@ -70,6 +70,9 @@ void BluetoothEngine::heartbeat() {
 
 void BluetoothEngine::setConnected(bool connected) {
     isConnected = connected;
+    // New session: don't suppress a message just because the last session ended
+    // on it. This runs on the BLE task, so only flag it; sendData() clears it.
+    resetSentData_ = true;
 
     if (connected == true) {
         if (didConnectCallback != nullptr) {
@@ -102,6 +105,10 @@ void BluetoothEngine::notifyStateIsComplete(uint8_t step) {
     sendData("S" + std::to_string(step) + "=C;"); 
 }
 
+void BluetoothEngine::notifyStateIsFailed(uint8_t step) {
+    sendData("S" + std::to_string(step) + "=F;");
+}
+
 void BluetoothEngine::notifyWeightUpdate(uint8_t step, double weight) {
     sendData("W" + std::to_string(step) + "=" + std::to_string(weight) + ";"); 
 }
@@ -117,12 +124,16 @@ void BluetoothEngine::notifyCupStatus(bool status) {
 }
 
 
-void BluetoothEngine::sendData(std::string txString) {  
+void BluetoothEngine::sendData(std::string txString, bool force) {  
     if (isConnected == false) {           
         return;
     }
 
-    if (txString == sentData) {     
+    if (resetSentData_.exchange(false)) {
+        sentData = "";
+    }
+
+    if (!force && txString == sentData) {     
         return;
     }
 
