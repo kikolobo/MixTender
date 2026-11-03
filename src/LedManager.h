@@ -41,9 +41,10 @@ private:
     CRGB leds_[76];
     CRGB backgroundColor_;
     FX currentFX_ = FX::NONE;
-    uint32_t FXdurationMS_;
+    uint32_t FXdurationMS_ = 0;
     uint32_t FXPeriodMS_;
-    uint32_t startTimestamp_;
+    uint32_t startTimestamp_ = 0;
+    bool isUniform_ = true; // All LEDs show currentColor_ (false after a range/tray pattern).
     CRGB startColor_;
     CRGB targetColor_;
     CRGB currentColor_; 

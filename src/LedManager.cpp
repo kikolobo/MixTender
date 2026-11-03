@@ -19,6 +19,7 @@ void LedManager::heartbeat() {
 
 void LedManager::setAllLeds(CRGB color, bool shouldRender) {
     currentColor_ = color;
+    isUniform_ = true;
     backgroundColor_ = color;
     currentBrightness_ = calculateBrightness_(color);    
     bool changesExist = false;
@@ -37,13 +38,15 @@ void LedManager::setAllLeds(CRGB color, bool shouldRender) {
 }
 
 void LedManager::setLed(int index, CRGB color) {
+    isUniform_ = false;
     leds_[index] = color; // Again, correcting: Direct assignment is correct
     FastLED.show();
 }
 
 void LedManager::clearAllLeds() {
     currentColor_ = CRGB::Black; // Using CRGB::Black for clarity
-    
+    isUniform_ = true;
+
     for (int i = 0; i < numLeds_; i++) {
         leds_[i] = CRGB::Black; // Using CRGB::Black for clarity
     }
@@ -51,16 +54,24 @@ void LedManager::clearAllLeds() {
 }
 
 void LedManager::clearLed(int index) {
+    isUniform_ = false;
     leds_[index] = CRGB::Black; // Using CRGB::Black for clarity
     FastLED.show();
 }
  
  
  void LedManager::fadeTo(CRGB startColor, CRGB targetColor, int durationMS) {
-        if (targetColor == targetColor_ || targetColor == currentColor_) {
+        // Already fading there, or already showing exactly that color.
+        // (Not just "same target as last time": a tray-tracking pattern may
+        // have been drawn since, and then the fade must run again.)
+        if (currentFX_ == FX::FADEIN && targetColor == targetColor_) {
             return;
         }
-        
+        if (currentFX_ == FX::NONE && isUniform_ && targetColor == currentColor_) {
+            return;
+        }
+
+
         targetColor_ = targetColor;
         currentFX_ = FX::FADEIN;
         FXdurationMS_ = durationMS;
@@ -70,30 +81,32 @@ void LedManager::clearLed(int index) {
     }
 
     void LedManager::performFade_() {
-        unsigned long currentTime = millis();
-        if (currentTime - startTimestamp_ <= FXdurationMS_) {
-            // Calculate the progress ratio based on elapsed time
-            float progress = (currentTime - startTimestamp_) / (float)FXdurationMS_;
+        uint32_t elapsed = millis() - startTimestamp_;
+        // Clamp so the last frame always lands on the target. Before, the
+        // fade only ended if a frame hit the exact final millisecond, so it
+        // usually never finished and stopped just short of the target color.
+        bool done = (FXdurationMS_ == 0) || (elapsed >= FXdurationMS_);
 
-            CRGB newColor = CRGB(
-                lerp8by8(startColor_.r, targetColor_.r, progress * 255),
-                lerp8by8(startColor_.g, targetColor_.g, progress * 255),
-                lerp8by8(startColor_.b, targetColor_.b, progress * 255)
+        CRGB newColor = targetColor_;
+        if (!done) {
+            uint8_t frac = (uint8_t)((elapsed * 255UL) / FXdurationMS_);
+            newColor = CRGB(
+                lerp8by8(startColor_.r, targetColor_.r, frac),
+                lerp8by8(startColor_.g, targetColor_.g, frac),
+                lerp8by8(startColor_.b, targetColor_.b, frac)
             );
+        }
 
-            // Apply the new color to all LEDs
-            for (int j = 0; j < numLeds_; j++) {
-                leds_[j] = newColor;
-            }
-            currentColor_ = newColor;
-            FastLED.show(); // Update the LEDs
-            
-            // End the effect once the progress completes
-            if (progress >= 1.0) {                
-                currentFX_ = FX::NONE;
-                currentColor_ = targetColor_;
-            }
-        }   
+        for (int j = 0; j < numLeds_; j++) {
+            leds_[j] = newColor;
+        }
+        currentColor_ = newColor;
+        isUniform_ = true;
+        FastLED.show();
+
+        if (done) {
+            currentFX_ = FX::NONE;
+        }
     }
 // void LedManager::fadeTo(CRGB startColor, CRGB targetColor, int durationMS) {    
 //     if (targetColor == targetColor_ || targetColor == currentColor_) {        
@@ -146,8 +159,10 @@ uint8_t LedManager::calculateBrightness_(CRGB color) {
 }
 
 void LedManager::setRange(uint8_t start, uint8_t end, CRGB color) {
+    currentFX_ = FX::NONE; // A drawn pattern replaces any running fade (they used to fight each frame).
     setAllLeds(backgroundColor_, false);
-    for (int i = start; i < end; i++) {
+    isUniform_ = false;
+    for (int i = start; i < end && i < numLeds_; i++) {
         leds_[i] = color;
     }
     FastLED.show();
@@ -161,9 +176,7 @@ void LedManager::trackTray(uint32_t position, CRGB color, CRGB backgroundColor) 
 }
 
 bool LedManager::fadedComplete() {
-    if (currentFX_ == FX::NONE  && currentColor_ == targetColor_) {
-        return true;
-    }
+    return currentFX_ == FX::NONE && isUniform_ && currentColor_ == targetColor_;
 }
 
 bool LedManager::isFading() {
